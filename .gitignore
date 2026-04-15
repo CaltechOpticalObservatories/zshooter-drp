@@ -1,0 +1,76 @@
+# --- Python bytecode / caches ---
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.cache/
+
+# --- Virtual envs & tools ---
+.venv/
+venv/
+.env/
+.env.*
+.nox/
+.tox/
+.rye/
+.python-version
+pip-wheel-metadata/
+pip-log.txt
+
+# --- Packaging / build artifacts ---
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+
+# --- Coverage / testing ---
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+pytestdebug.log
+
+# --- Type checkers & linters ---
+.mypy_cache/
+.pyre/
+.pytype/
+.ruff_cache/
+
+# --- Sphinx / RTD docs ---
+# Primary Sphinx build dir (often inside docs/)
+docs/_build/
+_build/
+# If you autogenerate API docs, ignore the output dir
+docs/_autosummary/
+docs/api/
+# Sphinx-gallery & plots (if used)
+docs/auto_examples/
+docs/generated/
+docs/_images/
+docs/_plots/
+
+# --- Jupyter / MyST notebooks (if used) ---
+.ipynb_checkpoints/
+.jupyter_cache/
+.jupyter/
+**/.ipynb_checkpoints/
+
+# --- Editors / IDEs ---
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- OS-specific ---
+.DS_Store
+Thumbs.db
+Icon?
+ehthumbs.db
+
+# --- Node (only if you build theme assets locally) ---
+node_modules/
+npm-debug.log*
+yarn-error.log
+pnpm-lock.yaml
+
