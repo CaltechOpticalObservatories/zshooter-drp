@@ -1,9 +1,9 @@
 import os, sys
 from datetime import datetime
-sys.path.insert(0, os.path.abspath("../src"))
+sys.path.insert(0, os.path.abspath("../../src"))
 
-project = "Your Project"
-author = "Your Name"
+project = "ZShooter DRP"
+author = "Sharma et. al & Caltech Optical Observatories"
 copyright = f"{datetime.now():%Y}, {author}"
 
 extensions = [

@@ -3,12 +3,12 @@ requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "your-project"
-version = "0.1.0"
-description = "Template project for Read the Docs"
+name = "ZShooter DRP"
+version = "0.0.1"
+description = "Placeholder for ZShooter DRP"
 readme = "README.md"
 requires-python = ">=3.12"
-authors = [{ name = "Your Name", email = "you@example.com" }]
+authors = [{ name = "Jeb Bailey", email = "jibailey@caltech.edu" }]
 license = { text = "MIT" }
 dependencies = []
 
