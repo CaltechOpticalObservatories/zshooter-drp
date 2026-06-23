@@ -1,0 +1,63 @@
+# ZSHOOTER instrument configuration
+
+__instrument__: ZSHOOTER
+instrument: INSTRUME
+id_instrument: "ZShooter_v2"
+telescope: KECK
+
+date: MJD-OBS
+date_format: mjd
+
+channels: [B, G, R, YJ, H, K]
+kw_channel: "DETECTOR"
+id_channel: ["CCD_B", "CCD_G", "CCD_R", "APD_YJ", "APD_H", "APD_K"]
+extension: 1
+orientation: [0, 0, 0]
+transpose: false
+
+prescan_x: 0
+overscan_x: 0
+prescan_y: 0
+overscan_y: 0
+naxis_x: NAXIS1
+naxis_y: NAXIS2
+
+gain: "GAIN"
+#readnoise: "RON"
+#dark: 10
+exposure_time: EXPTIME
+
+ra: RA
+dec: DEC
+jd: MJD-OBS
+#longitude: "HIERARCH ESO TEL GEOLON"
+#latitude: "HIERARCH ESO TEL GEOLAT"
+#altitude: "HIERARCH ESO TEL GEOELEV"
+#instrument_mode: "HIERARCH ESO SEQ ARM"
+#observation_type: "HIERARCH ESO DPR TYPE"
+#observation_category: "HIERARCH ESO DPR CATG"
+#target: "HIERARCH ESO OBS TARG NAME"
+object: OBJECT
+
+#id_dark: DARK
+#id_format: "LAMP,FMTCHK"
+#id_tell: "STD,TELLURIC"
+
+## File classification keywords and patterns
+kw_bias: "HIERARCH IMAGETYPE"
+kw_flat: "HIERARCH IMAGETYPE"
+kw_curvature: "HIERARCH IMAGETYPE"
+kw_scatter: "HIERARCH IMAGETYPE"
+kw_orders: "HIERARCH IMAGETYPE"
+kw_wave: "HIERARCH IMAGETYPE"
+kw_comb: null
+kw_spec: "HIERARCH IMAGETYPE"
+#
+id_bias: BIAS
+id_flat: "LAMP,FLAT"
+id_orders: "LAMP,FLAT"
+id_curvature: "LAMP,ARC"
+id_scatter: "LAMP,FLAT"
+id_wave: "LAMP,ARC"
+id_comb: null
+id_spec: OBJECT
