@@ -12,7 +12,7 @@ channels: [B, G, R, YJ, H, K]
 kw_channel: "DETECTOR"
 id_channel: ["CCD_B", "CCD_G", "CCD_R", "APD_YJ", "APD_H", "APD_K"]
 extension: 1
-orientation: [0, 0, 0]
+orientation: [0, 0, 0, 0, 0, 0]
 transpose: false
 
 prescan_x: 0
