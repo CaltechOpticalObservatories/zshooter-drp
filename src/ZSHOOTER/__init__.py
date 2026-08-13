@@ -26,4 +26,8 @@ class ZSHOOTER(Instrument):
         config = InstrumentConfig(**info)
         return config, info
 
+    def get_mask_filename(self, channel, **kwargs):
+        mf = f"mask_{channel}.npy"
+        cwd = os.path.dirname(__file__)
+        return os.path.join(cwd, mf)
 

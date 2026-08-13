@@ -11,16 +11,14 @@ flat:
 trace:
   degree: 4
   bias_scaling: exposure_time
-  filter_y: 1
-  filter_type: whittaker
-  min_cluster: 15000
+  filter_y: null
+  filter_type: gaussian
+  min_cluster: 20000
   noise_relative: 0.001
-  border_width: [30, 20, 200, 150]
-  auto_merge_threshold: 0.9
-  merge_min_threshold: 0.1
+  border_width: 40
   manual: false
-  min_width: 0.2
-  split_sigma: 4
+  min_width: 0.5
+  split_sigma: 5
 
 scatter:
   bias_scaling: exposure_time
@@ -28,15 +26,15 @@ scatter:
   border_width: 20
 
 norm_flat:
-  smooth_slitfunction: 2
+  smooth_slitfunction: 0.9
+  smooth_spectrum: 0
   extraction_height: 0.9
-  oversampling: 10
-  swath_width: 200
-  threshold: 1000
-  maxiter: 30
+  oversampling: 8
+  swath_width: 10
+  threshold: 50
+  maxiter: 3
 
 curvature:
-  bias_scaling: exposure_time
   dimensionality: 2D
   curve_degree: 1
   curve_height: 0.9
@@ -58,30 +56,6 @@ wavecal:
     - 8
   manual: false
   shift_window: 0
-
-freq_comb_master:
-  bias_scaling: exposure_time
-
-freq_comb:
-  dimensionality: 2D
-  degree:
-    - 6
-    - 6
-
-trace_sci:
-  degree: 4
-  bias_scaling: exposure_time
-  filter_y: 10
-  filter_x: 10
-  filter_type: gaussian
-  min_cluster: 5000
-  noise_relative: 0.001
-  border_width: 30
-  auto_merge_threshold: 0.9
-  merge_min_threshold: 0.1
-  manual: false
-  min_width: 0.2
-  split_sigma: 6
 
 science:
   bias_scaling: exposure_time

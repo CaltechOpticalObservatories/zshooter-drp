@@ -1,20 +1,20 @@
 [build-system]
-requires = ["setuptools>=69", "wheel"]
+requires = ["setuptools>=69", "wheel", "cffi"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ZShooter DRP"
+name = "ZShooter-DRP"
 version = "0.0.1"
 dependencies = [
-    "pyreduce-astro",
     "astropy",
     "numpy",
-    "matplotlib"
+    "matplotlib",
 ]
 description = "Placeholder for ZShooter DRP"
 readme = "README.md"
 requires-python = ">=3.12"
-authors = [{ name = "Jeb Bailey", email = "jibailey@caltech.edu" }]
+authors = [{ name = "Jeb Bailey", email = "jibailey@caltech.edu" },
+    { name = "Yashvi Sharma", email = "yssharma@caltech.edu" }]
 license = { text = "MIT" }
 
 [tool.setuptools]
