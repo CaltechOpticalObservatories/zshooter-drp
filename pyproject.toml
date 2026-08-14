@@ -10,7 +10,7 @@ dependencies = [
     "numpy",
     "matplotlib",
     "PyYAML",
-    "pyreduce",
+    "pyreduce-astro",
     "tqdm",
 ]
 description = "Data reduction pipeline components for ZShooter"
