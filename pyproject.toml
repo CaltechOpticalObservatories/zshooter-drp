@@ -9,8 +9,11 @@ dependencies = [
     "astropy",
     "numpy",
     "matplotlib",
+    "PyYAML",
+    "pyreduce",
+    "tqdm",
 ]
-description = "Placeholder for ZShooter DRP"
+description = "Data reduction pipeline components for ZShooter"
 readme = "README.md"
 requires-python = ">=3.12"
 authors = [{ name = "Jeb Bailey", email = "jibailey@caltech.edu" },
@@ -23,3 +26,5 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+ZSHOOTER = ["*.yaml", "*.npy"]

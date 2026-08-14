@@ -1,10 +1,16 @@
 from __future__ import annotations
-from typing import Literal
 from pathlib import Path
+from typing import Literal
 
-from src.ZSHOOTER import ZSHOOTER
-from utils import load_zshooter_settings, save_image_to_fits
-from steps import MaskWrapper, TraceWrapper, CurvatureWrapper, NormflatWrapper, ScienceWrapper
+from ZSHOOTER import ZSHOOTER
+from zsdrp.steps import (
+    CurvatureWrapper,
+    MaskWrapper,
+    NormflatWrapper,
+    ScienceWrapper,
+    TraceWrapper,
+)
+from zsdrp.utils import load_zshooter_settings, save_image_to_fits
 
 from pyreduce.combine_frames import combine_bias, combine_calibrate
 

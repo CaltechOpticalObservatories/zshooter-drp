@@ -1,6 +1,3 @@
-"""Example package for RTD template."""
-__all__ = ["add"]
+from zsdrp.protopipe import run_reduction
 
-def add(a: int, b: int) -> int:
-    """Add two integers and return the sum."""
-    return a + b
+__all__ = ["run_reduction"]

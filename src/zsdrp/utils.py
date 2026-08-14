@@ -1,11 +1,11 @@
 from copy import deepcopy
+import ZSHOOTER as zshooter_package
 import yaml
 from pathlib import Path
 from astropy.io import fits
 import matplotlib.pyplot as plt
 import numpy as np
 
-from src.ZSHOOTER import ZSHOOTER
 from pyreduce.configuration import load_config
 
 def yaml_loader(path: str | Path) -> dict:
@@ -13,7 +13,7 @@ def yaml_loader(path: str | Path) -> dict:
     with open(path) as f:
         return yaml.safe_load(f)
 
-def load_settings(path: str, instrument: str) -> dict:
+def load_settings(path: str | Path, instrument: str) -> dict:
     """
     Adds support for yaml settings files in addition to json.
     Calls pyreduce.configuration.load_config after loading yaml as dict if input is yaml, else calls it directly.
@@ -27,14 +27,14 @@ def load_settings(path: str, instrument: str) -> dict:
         raise ValueError(f'unknown settings file type: {path}')
     return load_config(cfg, instrument=instrument)
 
-def load_zshooter_settings(zshooter_instrument: ZSHOOTER | None = None) -> dict:
+def load_zshooter_settings(zshooter_instrument: zshooter_package.ZSHOOTER | None = None) -> dict:
     """
     Adds support for yaml settings files in addition to json.
     Calls pyreduce.configuration.load_config after loading yaml as dict if input is yaml, else calls it directly.
     """
-    zs = zshooter_instrument if zshooter_instrument is not None else ZSHOOTER()
+    zs = zshooter_instrument if zshooter_instrument is not None else zshooter_package.ZSHOOTER()
 
-    base = Path(__file__).parent.parent.resolve() / 'ZSHOOTER' / 'settings.yaml'
+    base = Path(zshooter_package.__file__).resolve().parent / 'settings.yaml'
     if not base.exists():
         raise ValueError(f'settings file does not exist: {base}')
     base_cfg = load_settings(base, instrument='ZSHOOTER')
