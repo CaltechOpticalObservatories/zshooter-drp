@@ -19,7 +19,7 @@ VALID_STEPS = ['mask', 'scatter', 'trace', 'curvature', 'norm_flat', 'wavecal', 
 ACTIVE_STEPS = ['mask', 'trace', 'curvature', 'norm_flat', 'science']
 
 def run_reduction(files, *,
-                  bias_key: str = 'bias', arc_key: str = 'arcs', flat_key: str = 'flat', science_key: str = 'star',
+                  bias_key: str = 'bias', arc_key: str = 'arcs', flat_key: str = 'flat',
                   zshooter_instrument: ZSHOOTER | None = None,
                   channels: list[str] | Literal['all'] | str = 'all',
                   disable_steps: list[str] | None = None,
@@ -41,6 +41,7 @@ def run_reduction(files, *,
 
     results = {}
     for channel in channels:
+        print(f"Running reduction for channel {channel}...")
         chanfiles = files[channel]
         chancfg = settings_cfg[channel]
         # load mask
@@ -71,10 +72,19 @@ def run_reduction(files, *,
         results[channel]['blaze'] = blaze
         results[channel]['slitfunc'] = slitfunc
         results[channel]['slitfunc_meta'] = slitfunc_meta
-        # science
-        spec = ScienceWrapper.run(chanfiles[science_key], traces, instrument=zs, channel=channel, bias=bias, bhead=bhead,
-                               norm=norm, step_cfg=chancfg.get('science', {})) if 'science' not in disable_steps else None
-        results[channel]['spectra'] = spec
+
+        results[channel]['spectra'] = {}
+        if 'science' not in disable_steps:
+            sci_objects = {}
+            for key in chanfiles.keys():
+                if key not in [bias_key, arc_key, flat_key]:
+                    sci_objects[key] = chanfiles[key]
+
+            for obj, sci_files in sci_objects.items():
+                print(f"Running science reduction for object {obj} ...")
+                spec = ScienceWrapper.run(sci_files, traces, instrument=zs, channel=channel, bias=bias,
+                                          bhead=bhead, norm=norm, step_cfg=chancfg.get('science', {}))
+                results[channel]['spectra'][obj] = spec
 
         if outdir is not None and Path(outdir).resolve().is_dir():
             save_image_to_fits(bias, bhead, f"{outdir}/master_bias_{channel}.fits")
@@ -82,7 +92,8 @@ def run_reduction(files, *,
             save_image_to_fits(flat, fhead, f"{outdir}/master_flat_{channel}.fits")
             TraceWrapper.save(traces, f"{outdir}/trace_{channel}.fits")
             NormflatWrapper.save(norm, blaze, slitfunc, slitfunc_meta, f"{outdir}/norm_{channel}.fits") if norm is not None else None
-            spec.save(f"{outdir}/spectra_{channel}.fits", steps=steps_run) if spec is not None else None
+            for obj, spec in results[channel]['spectra'].items():
+                spec.save(f"{outdir}/spectra_{obj}_{channel}.fits", steps=steps_run)
 
     return results
 
