@@ -2,7 +2,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from ZSHOOTER import ZSHOOTER
+from zsdrp.ZSHOOTER import ZSHOOTER
 from zsdrp.steps import (
     CurvatureWrapper,
     MaskWrapper,

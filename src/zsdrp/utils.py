@@ -1,5 +1,5 @@
 from copy import deepcopy
-import ZSHOOTER as zshooter_package
+import zsdrp.ZSHOOTER as zshooter_package
 import yaml
 from pathlib import Path
 from astropy.io import fits
