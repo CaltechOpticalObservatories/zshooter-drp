@@ -11,7 +11,7 @@ flat:
 trace:
   degree: 4
   bias_scaling: exposure_time
-  filter_y: null
+  filter_y: 30
   filter_type: gaussian
   min_cluster: 20000
   noise_relative: 0.001
