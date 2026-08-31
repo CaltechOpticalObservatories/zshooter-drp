@@ -1,0 +1,32 @@
+norm_flat:
+#  smooth_slitfunction: 2
+#  extraction_height: 0.9
+  oversampling: 8
+#  swath_width: 200
+#  threshold: 1000
+
+curvature:
+  dimensionality: 2D
+
+wavecal_master:
+  extraction_method: simple
+  bias_scaling: exposure_time
+
+wavecal:
+  threshold: 200
+  iterations: 3
+  dimensionality: 2D
+  degree:
+    - 7
+    - 8
+  manual: false
+  shift_window: 0
+
+science:
+  bias_scaling: exposure_time
+  oversampling: 10
+  extraction_height: 1
+  swath_width: 1000
+  smooth_slitfunction: 2
+  smooth_spectrum: 0
+  maxiter: 5
