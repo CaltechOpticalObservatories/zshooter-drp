@@ -1,16 +1,33 @@
 ## `.github/workflows/docs.yml`
 name: Docs
-on: [push, pull_request]
+
+on: [push, pull_request, workflow_dispatch]
+
 jobs:
   build-docs:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: "3.12" }
-      - run: python -m pip install -U pip
-      - run: pip install -e .
-      - run: pip install -r docs/requirements.txt
-      - run: sphinx-apidoc -o docs/api src/zsdrp -f -e
-      - run: sphinx-build -b html docs/source docs/_build/html
+      - uses: actions/checkout@v6
 
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            docs/requirements.txt
+
+      - name: Install project and documentation dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+          python -m pip install -r docs/requirements.txt
+
+      - name: Stage example notebooks
+        run: python docs/stage_notebooks.py
+
+      - name: Build documentation
+        run: python -m sphinx -W --keep-going -b html docs/source docs/_build/html
+
+      - name: Verify published examples
+        run: test -f docs/_build/html/notebooks/extraction_demo.html
