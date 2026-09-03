@@ -17,6 +17,9 @@ jobs:
             pyproject.toml
             docs/requirements.txt
 
+      - name: Install Pandoc
+        run: sudo apt-get update && sudo apt-get install --yes pandoc
+
       - name: Install project and documentation dependencies
         run: |
           python -m pip install --upgrade pip
