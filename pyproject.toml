@@ -20,6 +20,22 @@ authors = [{ name = "Jeb Bailey", email = "jibailey@caltech.edu" },
     { name = "Yashvi Sharma", email = "yssharma@caltech.edu" }]
 license = { text = "MIT" }
 
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0",
+]
+docs = [
+    "sphinx>=8.0",
+    "myst-parser>=4.0",
+    "furo",
+    "sphinx-autodoc-typehints",
+    "sphinx-copybutton>=0.5",
+    "sphinx-design>=0.6",
+    "sphinxcontrib-mermaid",
+    "linkify-it-py",
+    "nbsphinx",
+]
+
 [tool.setuptools]
 package-dir = {"" = "src"}
 
