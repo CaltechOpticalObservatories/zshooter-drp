@@ -47,8 +47,9 @@ def load_zshooter_settings(zshooter_instrument: zshooter_package.ZSHOOTER | None
         chan_cfg = yaml_loader(chan)
         print(f'Loading settings for channel: {channel}')
         cfg = deepcopy(base_cfg)
-        for k, v in chan_cfg.items():
-            cfg[k].update(v)
+        if chan_cfg is not None:
+            for k, v in chan_cfg.items():
+                cfg[k].update(v)
         cfgs[channel] = cfg
     return cfgs
 
@@ -78,3 +79,56 @@ def plot_spectra_object(obj, ax=None, title=None, xlabel=None, ylabel=None):
         ax.plot(sp.spec / np.nanmax(sp.spec) + 0.3 * i, label=f'order {sp.m}')
     ax.legend(fontsize=8, loc=(1.01, 0.0))
     return ax
+
+def make_static_mask(det_shape: tuple, mask_corners: list[tuple], savepath:str=None) -> np.ndarray:
+    """
+    Create a static mask for a detector image based on the provided corners of the mask polygon.
+    :param det_shape: tuple
+        The shape of the detector image (height, width).
+    :param mask_corners: list of tuples
+        The corners of the polygon to be masked, specified as (x, y) coordinates.
+    :param savepath: str, optional
+        The path to save the mask as a .npz file. If None, the mask will not be saved.
+    :return: np.ndarray
+        A boolean mask where True indicates unmasked pixels and False indicates masked pixels.
+    """
+    # mask points inside corners
+    from matplotlib.path import Path
+    ny, nx = det_shape
+    y, x = np.mgrid[0:ny, 0:nx]
+    points = np.column_stack((x.ravel(), y.ravel()))
+    polygon = Path(mask_corners)
+    mask = ~polygon.contains_points(points).reshape(ny, nx)
+    if savepath and '.npz' in savepath:
+        np.savez(savepath, mask=mask)
+    return mask
+
+
+##################### Misc #########################
+from contextlib import contextmanager
+from tqdm.auto import tqdm as auto_tqdm
+import pyreduce.extract as extract_module
+
+@contextmanager
+def patched_extract_tqdm(disable: bool):
+    if not disable:
+        yield
+        return
+
+    old_tqdm = getattr(extract_module, "tqdm", None)
+    old_trange = getattr(extract_module, "trange", None)
+
+    def _silent_tqdm(*args, **kwargs):
+        kwargs.setdefault("disable", True)
+        return auto_tqdm(*args, **kwargs)
+
+    extract_module.tqdm = _silent_tqdm
+    if old_trange is not None:
+        extract_module.trange = lambda *a, **k: _silent_tqdm(range(*a), **k)
+    try:
+        yield
+    finally:
+        if old_tqdm is not None:
+            extract_module.tqdm = old_tqdm
+        if old_trange is not None:
+            extract_module.trange = old_trange
