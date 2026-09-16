@@ -4,6 +4,7 @@ Defines instrument class for pyreduce to handle ZShooter specific info. Can be i
 
 import logging
 import os
+import pathlib
 import yaml
 
 from pyreduce.instruments.common import Instrument
@@ -26,8 +27,23 @@ class ZSHOOTER(Instrument):
         config = InstrumentConfig(**info)
         return config, info
 
-    def get_mask_filename(self, channel, **kwargs):
-        mf = f"mask_{channel}.npy"
-        cwd = os.path.dirname(__file__)
-        return os.path.join(cwd, mf)
+    @staticmethod
+    def get_mask_filename(channel, **kwargs):
+        mf = f"mask_{channel}*"
+        cwd = pathlib.Path(os.path.dirname(__file__)).expanduser().resolve()
+        files = cwd.glob(mf, case_sensitive=False)
+        return next(files, None)
+
+    @staticmethod
+    def detector_shape(channel):
+        """
+        Return the detector shape for the given channel.
+        """
+        if channel in ['BLUE', 'GREEN', 'RED']:
+            return (4096, 2048)
+        elif channel in ['YJ', 'H', 'K']:
+            return (2048, 2048)
+        else:
+            raise ValueError(f"Unknown channel {channel}.")
+
 
