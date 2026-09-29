@@ -2,7 +2,7 @@ import numpy as np
 import os
 import logging
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Optional, Sequence
 from pathlib import Path
 import matplotlib.pyplot as plt
 
@@ -15,7 +15,7 @@ from scipy.interpolate import make_interp_spline
 
 from zsdrp.utils import patched_extract_tqdm
 
-from pyreduce.combine_frames import combine_calibrate
+from pyreduce.combine_frames import combine_calibrate, combine_bias
 from pyreduce.trace import trace
 from pyreduce.trace_model import save_traces, load_traces
 from pyreduce.slit_curve import Curvature
@@ -88,34 +88,72 @@ class MaskWrapper(Step):
     @staticmethod
     def load(filename: str, channel: Optional[str]=None) -> np.ndarray | None:
         if not os.path.exists(filename):
-            logger.error(f"File not found: {filename}")
-            return None
-
-        if filename.endswith('.npz'):
+            raise FileNotFoundError(f"File not found: {filename}")
+        try:
             with np.load(filename, allow_pickle=True) as data:
-                if channel and channel in data:
-                    logger.info(f"Loading mask from {filename}, at key '{channel}'")
-                    return data[channel]
-                elif 'mask' in data:
-                    logger.info(f"Loading mask from {filename}, at key 'mask'")
-                    return data['mask']
+                if '.npy' in filename:
+                    return data
                 else:
-                    data = dict(data)
-                    if len(data) == 1:
-                        key = list(data.keys())[0]
-                        value = list(data.values())[0]
-                        logger.info(f"Loading mask from {filename}, at key '{key}'")
-                        return value
+                    if channel and channel in data:
+                        logger.info(f"Loading mask from {filename}, at key '{channel}'")
+                        return data[channel]
+                    elif 'mask' in data:
+                        logger.info(f"Loading mask from {filename}, at key 'mask'")
+                        return data['mask']
                     else:
-                        logger.error(f"Multiple keys found in {filename}, but no 'mask' or specified channel key. "
-                                     f"Keys: {list(data.keys())}")
-                        return None
-        elif filename.endswith('.npy'):
-            logger.info(f"Loading mask from {filename}")
-            return np.load(filename, allow_pickle=True)
+                        raise ValueError(f"Neither key 'mask' nor {channel} found in {filename}, "
+                                         f"save the mask with the appropriate key.")
+        except:
+            raise ValueError(f"Unsupported file format for {filename}. Only .npz and .npy are supported.")
+
+
+class BiasWrapper(Step):
+    name = 'bias'
+
+    @staticmethod
+    def run(filenames: Sequence[str], *,
+            instrument: Instrument,
+            channel: str,
+            **kwargs):
+        """
+        Run the bias step on the provided filenames using the specified instrument and channel.
+        :param filenames: List of filenames to process.
+        :param instrument: The instrument to use for the bias step.
+        :param channel: The channel to use for the bias step.
+        :return: The result of the bias step.
+        """
+        if filenames is None or len(filenames) == 0:
+            logger.warning(f"No bias files provided for channel {channel}, check your input files. "
+                           f"Skipping bias combination for this channel.")
+            return None, None
+        return combine_bias(files=list(filenames), instrument=instrument, channel=channel)
+
+
+class FlatWrapper(Step):
+    name = 'flat'
+
+    @staticmethod
+    def run(filenames: Sequence[str], *,
+            instrument: Instrument,
+            channel: str,
+            bias: Optional[np.ndarray] = None,
+            bhead: Optional[dict] = None,
+            step_cfg: dict,
+            **kwargs):
+        """
+        Run the flat step on the provided filenames using the specified instrument and channel.
+        :param filenames: List of filenames to process.
+        :param instrument: The instrument to use for the flat step.
+        :param channel: The channel to use for the flat step.
+        :return: The result of the flat step.
+        """
+        if filenames is None or len(filenames) == 0:
+            logger.warning(f"No flat files found for channel {channel}, check your input files. "
+                           f"Skipping flat combination for this channel.")
+            return None, None
         else:
-            logger.error(f"Unsupported file format, only .npz/.npy are supported: {filename}")
-            return None
+            return combine_calibrate(files=list(filenames), instrument=instrument, channel=channel, bias=bias,
+                                     bhead=bhead, **step_cfg)
 
 
 class TraceWrapper(Step):
@@ -153,7 +191,7 @@ class TraceWrapper(Step):
 
     @staticmethod
     def load(filename):
-        return load_traces(filename)
+        return load_traces(filename)[0]
 
 
 class CurvatureWrapper(Step):
@@ -247,16 +285,20 @@ class NormflatWrapper(Step):
     @staticmethod
     def save(norm, blaze, slitfunc, slitfunc_meta, filename):
         os.makedirs(os.path.dirname(filename), exist_ok=True)
-        if filename.endswith('.npz'):
-            np.savez(filename, norm=norm, blaze=blaze, slitfunc=np.array(slitfunc, dtype=object),
+        np.savez(filename, norm=norm, blaze=blaze, slitfunc=np.array(slitfunc, dtype=object),
                         slitfunc_meta=slitfunc_meta)
-        else:
-            raise ValueError("Filename must end with .npz")
 
     @staticmethod
     def load(filename):
+        if not os.path.exists(filename):
+            raise FileNotFoundError(f"File not found: {filename}")
         if filename.endswith('.npz'):
-            return np.load(filename, allow_pickle=True)
+            with np.load(filename, allow_pickle=True) as data:
+                norm = data['norm']
+                blaze = data['blaze']
+                slitfunc = data['slitfunc'].tolist()  # Convert back to list
+                slitfunc_meta = data['slitfunc_meta'].item()  # Convert back to dict
+                return norm, blaze, slitfunc, slitfunc_meta
         else:
             raise ValueError("Filename must end with .npz")
 
@@ -340,6 +382,24 @@ class WavecalWrapper(Step):
                     t.m = obase + idx_in_group
                 logger.info("Updated trace order numbers with obase=%d",obase)
         return wlen, wave, linelist, metrics
+
+    @staticmethod
+    def save(wave_img, wavesol, filename: str):
+        os.makedirs(os.path.dirname(filename), exist_ok=True)
+        # Save the wavelength calibration data to a .npz file
+        np.savez(filename, wave_img=wave_img, wavesol=wavesol)
+
+    @staticmethod
+    def load(filename: str):
+        if not os.path.exists(filename):
+            raise FileNotFoundError(f"File not found: {filename}")
+        if filename.endswith('.npz'):
+            with np.load(filename, allow_pickle=True) as data:
+                wave_img = data['wave_img']
+                wavesol = data['wavesol']
+                return wave_img, wavesol
+        else:
+            raise ValueError(f"Unsupported file format, only .npz is supported: {filename}")
 
 
 class ScienceWrapper(Step):
@@ -515,68 +575,3 @@ def splice(spectra: Spectra, simple=True, **kwargs):
     new_spectrum = Spectrum(m=None, spec=spec[sorted_wv], sig=sig[sorted_wv], wave=wave[sorted_wv],
                             cont=cont[sorted_wv])
     return Spectra(header=spectra.header, data=[new_spectrum], params=spectra.params)
-
-
-# class ContinuumNormalizeWrapper(Step):
-#     name = 'continuum'
-
-    # @staticmethod
-    # def run(spectra: Spectra,
-    #         wave: np.ndarray,
-    #         blaze: np.ndarray,
-    #         *,
-    #         step_cfg: dict,
-    #         **kwargs) -> Spectra:
-    #     """
-    #     Run the continuum normalization step on the provided spectra using traces and blaze function.
-    #     :param spectra: Spectra object containing the extracted spectra and associated metadata.
-    #     :param wave: Wavelength solution array of shape (n_trace, n_cols)
-    #     :param blaze: Blaze function array corresponding to the spectra.
-    #     :param step_cfg: Dictionary containing the settings for the continuum normalization step.
-    #     :keyword print_params: If True, prints the supplied parameters used for continuum normalization.
-    #     :return: A new Spectra object containing the continuum-normalized spectra and associated metadata.
-    #     """
-    #     header = spectra.header
-    #     spectrum = spectra.data
-    #     spec = np.ma.masked_invalid([s.spec for s in spectrum])
-    #     sigma = np.ma.masked_invalid([s.sig for s in spectrum])
-    #     column = np.array([np.where(m==False)[0][[0,-1]] for m in spec.mask])
-    #
-    #     nspec = spec.shape[0]
-    #     # Align all arrays to the smallest count (norm_flat may skip edge traces)
-    #     nmin = min(nspec, len(blaze), len(wave) if wave is not None else nspec)
-    #     if nspec > nmin:
-    #         spec = spec[nspec - nmin:]
-    #         sigma = sigma[nspec - nmin:]
-    #         column = column[nspec - nmin:]
-    #         nspec = nmin
-    #     if wave is not None and len(wave) > nmin:
-    #         wave = wave[len(wave) - nmin:]
-    #     if len(blaze) > nmin:
-    #         blaze = blaze[len(blaze) - nmin:]
-    #
-    #     logger.info("Splicing orders")
-    #     spec, wave, blaze, sigma = splice_orders(spec, wave, blaze, sigma, scaling=True, plot=step_cfg['plot'],
-    #                                              plot_title=step_cfg['plot_title'])
-    #
-    #     logger.info("Normalizing continuum")
-    #     cont = continuum_normalize(spec, wave, blaze, sigma, plot=step_cfg['plot'], plot_title=step_cfg['plot_title'])
-    #     header["e_cont"] = (True, "CONT is a fitted continuum, orders spliced")
-    #
-    #     ntrace = spec.shape[0]
-    #     # Convert arrays to list[Spectrum], masking outside column range with NaN
-    #     spectra_list = []
-    #     for j in range(ntrace):
-    #         spec_row = np.array(spec[j], dtype=np.float32)
-    #         sig_row = np.array(sigma[j], dtype=np.float32)
-    #         wave_row = np.array(wave[j], dtype=np.float64) if wave is not None else None
-    #         cont_row = np.array(cont[j], dtype=np.float32) if cont is not None else None
-    #         # Apply column mask as NaN
-    #         if column is not None:
-    #             spec_row[: column[j, 0]] = np.nan
-    #             spec_row[column[j, 1]:] = np.nan
-    #             sig_row[: column[j, 0]] = np.nan
-    #             sig_row[column[j, 1]:] = np.nan
-    #         spectra_list.append(Spectrum(m=j, spec=spec_row, sig=sig_row, wave=wave_row, cont=cont_row))
-    #
-    #     return Spectra(header=header, data=spectra_list)
