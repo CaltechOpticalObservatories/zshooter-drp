@@ -3,10 +3,12 @@ import zsdrp.ZSHOOTER as zshooter_package
 import yaml
 from pathlib import Path
 from astropy.io import fits
+from astropy.table import Table
 import matplotlib.pyplot as plt
 import numpy as np
 
 from pyreduce.configuration import load_config
+from pyreduce.spectra import Spectra
 
 def yaml_loader(path: str | Path) -> dict:
     path = Path(path).expanduser().resolve()
@@ -45,7 +47,6 @@ def load_zshooter_settings(zshooter_instrument: zshooter_package.ZSHOOTER | None
         if not chan.exists():
             raise ValueError(f'requested channel settings file does not exist: {chan}')
         chan_cfg = yaml_loader(chan)
-        print(f'Loading settings for channel: {channel}')
         cfg = deepcopy(base_cfg)
         if chan_cfg is not None:
             for k, v in chan_cfg.items():
@@ -63,6 +64,24 @@ def save_image_to_fits(image, header, filename: str):
     hdul = fits.HDUList([fits.PrimaryHDU(header=header), fits.ImageHDU(data=image, header=header)])
     hdul.writeto(filename, overwrite=True)
 
+def save_spectra_to_ascii(spectra: Spectra, filename: str):
+    """
+    Save a Spectra object to an ASCII file.
+    """
+    outdir = Path(filename).parent
+    outdir.mkdir(parents=True, exist_ok=True)
+    data = dict()
+    header = dict(spectra.header)
+    for i, sp in enumerate(spectra.data):
+        data['wavelength'] = np.concatenate((data.get('wave', np.array([])), sp.wave))
+        data['flux'] = np.concatenate((data.get('spec', np.array([])), sp.spec))
+        data['eflux'] = np.concatenate((data.get('sig', np.array([])), sp.sig))
+        data['blaze'] = np.concatenate((data.get('cont', np.array([])), sp.cont))
+        data['index'] = np.concatenate((data.get('index', np.array([])), [i] * len(sp.wave)))
+
+    table = Table(data, meta=header)
+    table.write(filename, format='ascii', overwrite=True, delimiter='\t', comment='# ')
+
 def plot_spectra_object(obj, ax=None, title=None, xlabel=None, ylabel=None):
     if ax is None:
         fig, ax = plt.subplots(1, 1, figsize=(6, 6))
@@ -72,11 +91,12 @@ def plot_spectra_object(obj, ax=None, title=None, xlabel=None, ylabel=None):
         ax.set_xlabel(xlabel)
     if ylabel:
         ax.set_ylabel(ylabel)
-    orders = [sp.m for sp in obj.data]
-    sorted_orders = np.argsort(orders)
-    for i in sorted_orders:
-        sp = obj.data[i]
-        ax.plot(sp.spec / np.nanmax(sp.spec) + 0.3 * i, label=f'order {sp.m}')
+    for i, sp in enumerate(obj.data):
+        if sp.wave:
+            x = sp.wave
+        else:
+            x = range(len(sp.spec))
+        ax.plot(x, sp.spec / np.nanmax(sp.spec) + 0.3 * i, label=f'order {i}')
     ax.legend(fontsize=8, loc=(1.01, 0.0))
     return ax
 
