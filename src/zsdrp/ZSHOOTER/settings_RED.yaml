@@ -1,3 +1,14 @@
 trace:
   filter_y: 10
   border_width: 50
+
+wavecal_init:
+  atlas: "zshooter"
+  medium: 'vac'
+  resid_delta: 100000
+  smoothing: 1
+  edge_margin: 0
+  wave_delta: 20
+  cutoff: 0.0
+  match_tolerance: 5.0
+  plot: False
