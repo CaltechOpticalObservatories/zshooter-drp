@@ -27,4 +27,4 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-ZSHOOTER = ["*.yaml", "*.npy"]
+ZSHOOTER = ["*.yaml", "*.npy", "*_list.txt", "*.fits", "*.fits.gz"]

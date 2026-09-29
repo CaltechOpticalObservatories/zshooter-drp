@@ -13,6 +13,14 @@ from pyreduce.instruments.models import InstrumentConfig
 logger = logging.getLogger(__name__)
 
 class ZSHOOTER(Instrument):
+    def __init__(self):
+        super().__init__()
+        # Instrument.__init__ points _inst_dir at pyreduce/instruments/ZSHOOTER,
+        # which does not exist since this package lives outside pyreduce. Point it
+        # here so the line atlases shipped next to config.yaml are picked up:
+        # pyreduce searches _inst_dir ahead of its own defaults/atlas/.
+        self._inst_dir = os.path.dirname(os.path.abspath(__file__))
+
     def load_info(self):
         """
         Load ZShooter instrument config from the yaml config in this package.
