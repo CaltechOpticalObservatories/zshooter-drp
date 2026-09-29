@@ -5,8 +5,8 @@ instrument: INSTRUME
 id_instrument: "ZShooter_v2"
 telescope: KECK
 
-date: MJD-OBS
-date_format: mjd
+date: DATE-OBS
+date_format: isot
 
 channels: [BLUE, GREEN, RED, YJ, H, K]
 kw_channel: CHANNEL
@@ -27,9 +27,9 @@ readnoise: 0.0
 dark: 0.0
 exposure_time: EXPTIME
 
-ra: RA
-dec: DEC
-jd: MJD-OBS
+#ra: RA
+#dec: DEC
+#jd: MJD-OBS
 #longitude: "HIERARCH ESO TEL GEOLON"
 #latitude: "HIERARCH ESO TEL GEOLAT"
 #altitude: "HIERARCH ESO TEL GEOELEV"
