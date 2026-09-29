@@ -1,46 +1,37 @@
 import numpy as np
 import os
+import logging
 from abc import ABC, abstractmethod
-from contextlib import contextmanager
-from tqdm.auto import tqdm as auto_tqdm
+from typing import Optional
+from pathlib import Path
+import matplotlib.pyplot as plt
 
-import pyreduce.extract as extract_module
+from astropy.io import fits
+from astropy.modeling.fitting import FittingWithOutlierRemoval, LinearLSQFitter
+from astropy.modeling.models import Chebyshev1D
+from scipy.ndimage import median_filter
+from astropy.stats import sigma_clip
+from scipy.interpolate import make_interp_spline
+
+from zsdrp.utils import patched_extract_tqdm
+
 from pyreduce.combine_frames import combine_calibrate
 from pyreduce.trace import trace
 from pyreduce.trace_model import save_traces, load_traces
 from pyreduce.slit_curve import Curvature
 from pyreduce.extract import extract_normalize, extract
-from pyreduce.spectra import ExtractionParams, Spectra
+from pyreduce.wavelength_calibration import WavelengthCalibrationInitialize, WavelengthCalibration
+from pyreduce.spectra import ExtractionParams, Spectra, Spectrum
 from pyreduce.instruments.common import Instrument
 
-@contextmanager
-def _patched_extract_tqdm(disable: bool):
-    if not disable:
-        yield
-        return
+logger = logging.getLogger(__name__)
 
-    old_tqdm = getattr(extract_module, "tqdm", None)
-    old_trange = getattr(extract_module, "trange", None)
-
-    def _silent_tqdm(*args, **kwargs):
-        kwargs.setdefault("disable", True)
-        return auto_tqdm(*args, **kwargs)
-
-    extract_module.tqdm = _silent_tqdm
-    if old_trange is not None:
-        extract_module.trange = lambda *a, **k: _silent_tqdm(range(*a), **k)
-    try:
-        yield
-    finally:
-        if old_tqdm is not None:
-            extract_module.tqdm = old_tqdm
-        if old_trange is not None:
-            extract_module.trange = old_trange
 
 class Step(ABC):
     @staticmethod
     @abstractmethod
     def run(*args, **kwargs):
+        """ Main step logic goes here. This method should be overridden by subclasses. """
         pass
 
     @staticmethod
@@ -51,29 +42,100 @@ class Step(ABC):
     def load(*args, **kwargs):
         pass
 
+    def __call__(self, *args, **kwargs):
+        return self.run(*args, **kwargs)
+
 
 class MaskWrapper(Step):
     name = 'mask'
 
     @staticmethod
-    def run(instrument: Instrument, channel: str) -> np.ndarray:
-        maskfile = instrument.get_mask_filename(channel)
-        return np.load(maskfile).astype(bool)
+    def run(filename: Optional[str | Path] = None,
+            *,
+            instrument: Optional[Instrument] = None,
+            channel: Optional[str] = None,
+            default_shape: Optional[tuple[int, int]] = None
+            ) -> np.ndarray:
+        """
+        Loads and returns a mask from a .npz or .npy file. Returns a default mask of zeros if filename is None, or
+        file does not exist or file format is unsupported.
+
+        :param filename: Path to the mask file (.npz or .npy). If None, a default mask of zeros is returned.
+        :param instrument: Instrument instance to determine the shape of the default mask if filename is None.
+                           Calls instrument.detector_shape(channel) to get the shape.
+        :param channel: Channel name to determine the shape of the default mask if filename is None.
+        :param default_shape: Tuple specifying the shape of the default mask if filename is None and instrument/channel are not provided.
+        :return: A numpy ndarray representing the mask.
+        """
+        mask = MaskWrapper.load(str(filename), channel) if filename else None
+        if mask is None:
+            if instrument is not None and channel is not None and hasattr(instrument, 'detector_shape'):
+                mask = np.zeros(instrument.detector_shape(channel), dtype=bool)
+            elif default_shape is not None:
+                mask = np.zeros(default_shape, dtype=bool)
+            else:
+                raise ValueError("No valid mask source provided.")
+        return mask
 
     @staticmethod
-    def save(mask: np.ndarray, filename: str):
-        np.save(filename, mask)
+    def save(masks: dict[str, np.ndarray] | np.ndarray, filename: str):
+        os.makedirs(os.path.dirname(filename), exist_ok=True)
+        if isinstance(masks, np.ndarray):
+            np.savez(filename, mask=masks)
+        else:
+            np.savez(filename, **masks)
 
     @staticmethod
-    def load(instrument, channel):
-        return MaskWrapper.run(instrument, channel)
+    def load(filename: str, channel: Optional[str]=None) -> np.ndarray | None:
+        if not os.path.exists(filename):
+            logger.error(f"File not found: {filename}")
+            return None
+
+        if filename.endswith('.npz'):
+            with np.load(filename, allow_pickle=True) as data:
+                if channel and channel in data:
+                    logger.info(f"Loading mask from {filename}, at key '{channel}'")
+                    return data[channel]
+                elif 'mask' in data:
+                    logger.info(f"Loading mask from {filename}, at key 'mask'")
+                    return data['mask']
+                else:
+                    data = dict(data)
+                    if len(data) == 1:
+                        key = list(data.keys())[0]
+                        value = list(data.values())[0]
+                        logger.info(f"Loading mask from {filename}, at key '{key}'")
+                        return value
+                    else:
+                        logger.error(f"Multiple keys found in {filename}, but no 'mask' or specified channel key. "
+                                     f"Keys: {list(data.keys())}")
+                        return None
+        elif filename.endswith('.npy'):
+            logger.info(f"Loading mask from {filename}")
+            return np.load(filename, allow_pickle=True)
+        else:
+            logger.error(f"Unsupported file format, only .npz/.npy are supported: {filename}")
+            return None
 
 
 class TraceWrapper(Step):
     name = 'trace'
 
     @staticmethod
-    def run(image, step_cfg, order_centers=None, **kwargs):
+    def run(image: np.ndarray,
+            *,
+            step_cfg: dict,
+            order_centers: Optional[dict[int, int | float]] = None,
+            **kwargs):
+        """
+        Run the tracing step on the provided image using the specified configuration.
+        :param image: The input image to trace. Should be a flat field image (e.g., from a flat lamp).
+        :param step_cfg: Dictionary containing the settings for the tracing step.
+        :param order_centers: Optional dictionary mapping order numbers to their approximate center positions in pixels.
+                                If provided, these will be used to guide the tracing.
+        :keyword print_params: If True, prints the supplied parameters used for tracing. Default is True.
+        :return: A list of Trace objects representing the traced orders in the image.
+        """
         mapping = {'split_sigma': 'sigma'}
         params = {mapping.get(k,k): v for k, v in step_cfg.items()}
         params.pop('bias_scaling') if 'bias_scaling' in params else None
@@ -98,7 +160,19 @@ class CurvatureWrapper(Step):
     name = 'curvature'
 
     @staticmethod
-    def run(image, traces, step_cfg, **kwargs):
+    def run(image: np.ndarray,
+            traces: list,
+            *,
+            step_cfg: dict,
+            **kwargs):
+        """
+        Run the curvature fitting step on the provided image and traces using the specified configuration.
+        :param image: The input image to fit curvature. Should be an arc lamp image.
+        :param traces: List of Trace objects representing the traced orders in the image.
+        :param step_cfg: Dictionary containing the settings for the curvature fitting step.
+        :keyword print_params: If True, prints the supplied parameters used for curvature fitting. Default is True.
+        :return: The updated list of Trace objects with curvature information added.
+        """
         mapping = {'degree': 'fit_degree', 'curvature_cutoff': 'sigma_cutoff', 'dimensionality': 'mode'}
         params = {mapping.get(k,k): v for k, v in step_cfg.items()}
         params.pop('bias_scaling') if 'bias_scaling' in params else None
@@ -121,11 +195,28 @@ class CurvatureWrapper(Step):
                 t.slitdelta = slitdeltas[i]
         return traces
 
+
 class NormflatWrapper(Step):
     name = 'norm_flat'
 
     @staticmethod
-    def run(image, header, traces, step_cfg, **kwargs):
+    def run(image: np.ndarray,
+            header: dict,
+            traces: list,
+            *,
+            step_cfg: dict,
+            **kwargs):
+        """
+        Run the flat norm and blaze calculation on the provided image and traces using the specified configuration.
+        :param image: The input flat field image to normalize. Should be a flat lamp image.
+        :param header: The header associated with the image, containing gain, readnoise, and dark information.
+        :param traces: List of Trace objects representing the traced orders in the image.
+        :param step_cfg: Dictionary containing the settings for the norm flat calculation step.
+        :keyword scatter: Optional scatter parameter to be passed to the extraction function.
+        :keyword print_params: If True, prints the supplied parameters used for norm flat calculation.
+        :return: A tuple containing the normalized flat (norm), blaze function (blaze), slit function (slitfunc),
+        and metadata for the slit function (slitfunc_meta).
+        """
         mapping = {'smooth_slitfunction': 'lambda_sf', 'smooth_spectrum': 'lambda_sp', 'oversampling': 'osample',
                    'extraction_reject': 'reject_threshold'}
         params = {mapping.get(k,k): v for k, v in step_cfg.items()}
@@ -136,7 +227,7 @@ class NormflatWrapper(Step):
             print(f"Normflat parameters: {params}")
 
         disable_tqdm = kwargs.get('disable_tqdm', True)
-        with _patched_extract_tqdm(disable_tqdm):
+        with patched_extract_tqdm(disable_tqdm):
             norm, _, blaze, slitfunc, column_range = extract_normalize(image, traces, **params)
 
         blaze = np.ma.filled(blaze, 0)
@@ -170,44 +261,322 @@ class NormflatWrapper(Step):
             raise ValueError("Filename must end with .npz")
 
 
+class WavecalWrapper(Step):
+    name = 'wavecal'
+
+    @staticmethod
+    def run(image: np.ndarray,
+            header: dict,
+            traces: list,
+            *,
+            instrument: Instrument,
+            channel: str,
+            master_step_cfg: dict,
+            init_step_cfg: dict,
+            step_cfg: dict,
+            **kwargs):
+        """
+        Run the wavelength calibration step on the provided image and traces using the specified configuration.
+        :param image: Wavecal image (arc lamp) to extract from.
+        :param header: Header associated with the image, containing gain, readnoise, and dark information.
+        :param traces: List of Trace objects representing the traced orders in the image.
+        :param instrument: Instrument instance to determine the wavelength range and atlas search directories.
+        :param channel: Channel name to determine the wavelength range.
+        :param master_step_cfg: Dictionary containing the settings for the wavecal_master extraction step.
+        :param init_step_cfg: Dictionary containing the settings for the wavecal_init step.
+        :param step_cfg: Dictionary containing the settings for the wavecal final step.
+        :keyword scatter: Optional scatter parameter to be passed to the extraction function.
+        :keyword print_params: If True, prints the supplied parameters used for wavecal extraction.
+        :keyword disable_tqdm: If True, disables the progress bar for the extraction function.
+
+        :return: A tuple containing the wavelength image (array of shape (n_trace, n_cols)), wavelength solution,
+                 linelist of identified lines, and quality metrics.
+        """
+        # Wavecal_master substep
+        mapping = {'smooth_slitfunction': 'lambda_sf', 'smooth_spectrum': 'lambda_sp', 'oversampling': 'osample',
+                   'extraction_reject': 'reject_threshold', 'extraction_method': 'extraction_type'}
+        params = {mapping.get(k, k): v for k, v in master_step_cfg.items()}
+        params.update({'gain': header["e_gain"], 'readnoise': header["e_readn"], 'dark': header["e_drk"]})
+        params['scatter'] = kwargs.get('scatter', None)
+        if kwargs.get('print_params', True):
+            print(f"Wavecal Master extraction parameters: {params}")
+
+        # reset traces wave to None before extraction to avoid using old wavecal data
+        for t in traces:
+            t.wave = None
+        disable_tqdm = kwargs.get('disable_tqdm', True)
+        with patched_extract_tqdm(disable_tqdm):
+            spectra = extract(image, traces, **params)
+        wavecal_spec = np.array([s.spec for s in spectra])
+
+        # Wavecal_init substep
+        init_step_cfg['atlas_name'] = init_step_cfg.pop('atlas')
+        init_step_cfg['wave_delta'] = init_step_cfg.get('wave_delta', 20)
+        if kwargs.get('print_params', True):
+            print(f"Wavecal Init parameters: {init_step_cfg}")
+        wave_range = instrument.get_wavelength_range(header, channel)
+        if wave_range is None:
+            raise ValueError(f"Wavelength range not defined for instrument {instrument.name} and channel {channel}")
+        module = WavelengthCalibrationInitialize(atlas_search_dirs=[instrument._inst_dir], **init_step_cfg)
+        module._init_plot_count = kwargs.get('init_plot_count', 5)
+        linelist = module.execute(wavecal_spec, wave_range)
+
+        # wavecal final substep
+        step_cfg['atlas_name'] = step_cfg.pop('atlas')
+        if kwargs.get('print_params', True):
+            print(f"Wavecal Final parameters: {step_cfg}")
+        module = WavelengthCalibration(atlas_search_dirs=[instrument._inst_dir], **step_cfg)
+        wlen, wave, linelist = module.execute(wavecal_spec, linelist)
+        metrics = module.quality_metrics(wave, linelist)
+        print(f"Wavecal quality : {metrics["rms_mps"]} m/s")
+
+        obase = linelist.obase
+        if obase is not None:
+            already_have_m = any(t.m is not None for t in traces)
+            if already_have_m:
+                logger.debug("Traces already have m values, skipping obase")
+            else:
+                for idx_in_group, t in enumerate(traces):
+                    t.m = obase + idx_in_group
+                logger.info("Updated trace order numbers with obase=%d",obase)
+        return wlen, wave, linelist, metrics
+
+
 class ScienceWrapper(Step):
     name = 'science'
 
     @staticmethod
-    def run(images, traces, instrument, channel, bias, bhead, norm, step_cfg, **kwargs):
+    def run(images: list[str],
+            traces: list,
+            *,
+            instrument: Instrument,
+            channel: str,
+            bias: Optional[np.ndarray] = None,
+            bhead: Optional[dict] = None,
+            norm: Optional[np.ndarray] = None,
+            mask: Optional[np.ndarray] = None,
+            step_cfg: dict,
+            **kwargs) -> dict[str, Spectra]:
         """
-        Preproc science images (combine_calibrate), run tracing, then run extraction.
-        :param images: list of science images that belong to same target
+        Preprocess science images (combine_calibrate), run tracing, then run extraction.
+        :param images: list of science images
         :param traces: traces to extract
         :param instrument: Instrument instance
         :param channel: Channel name
         :param bias: Bias image
         :param bhead: Bias header
         :param norm: Norm image
+        :param mask: Mask image
         :param step_cfg: Step configuration for science extraction
+        :keyword scatter: Optional scatter parameter to be passed to the extraction function.
+        :keyword print_params: If True, prints the supplied parameters used for science extraction.
+        :return: dict of Spectra objects containing the extracted spectra and associated metadata, keyed by object name.
         """
         mapping = {'smooth_slitfunction': 'lambda_sf', 'smooth_spectrum': 'lambda_sp', 'oversampling': 'osample',
                    'extraction_reject': 'reject_threshold', 'extraction_method':'extraction_type'}
         params = {mapping.get(k,k): v for k,v in step_cfg.items()}
-
-        im, head = combine_calibrate(images, instrument=instrument, channel=channel, bias=bias, bhead=bhead, norm=norm,
-                                     extraction_height=params['extraction_height'], bias_scaling=params.pop('bias_scaling'),
-                                     norm_scaling=params.pop('norm_scaling'))
-        params.update({'gain': head["e_gain"], 'readnoise': head["e_readn"], 'dark': head["e_drk"]})
+        bias_scaling = params.pop('bias_scaling')
+        norm_scaling = params.pop('norm_scaling')
         params['scatter'] = kwargs.get('scatter', None)
-        if kwargs.get('print_params', True):
-            print(f"Science extraction parameters: {params}")
 
-        meta = ExtractionParams(
-            osample=params.get("osample", 10),
-            lambda_sf=params.get("lambda_sf", 1.0),
-            lambda_sp=params.get("lambda_sp", 0.0),
-            swath_width=params.get("swath_width"),
-        )
+        groups = dict()
+        for img in images:
+            objname = fits.getheader(img, ext=0)['OBJECT']
+            groups[objname] = groups.get(objname, []) + [img]
 
-        disable_tqdm = kwargs.get('disable_tqdm', True)
-        with _patched_extract_tqdm(disable_tqdm):
-            spec = extract(im, traces, **params)
-        spec_obj = Spectra(header=head, data=spec, params=meta)
-        return spec_obj
+        group_spectra = dict()
+        for objname, imgs in groups.items():
+            logger.info(f"Processing {objname} for science extraction with {len(imgs)} images.")
+            im, head = combine_calibrate(imgs, instrument=instrument, channel=channel, bias=bias, bhead=bhead,
+                                         norm=norm, mask=mask, extraction_height=params['extraction_height'],
+                                         bias_scaling=bias_scaling, norm_scaling=norm_scaling)
 
+            params.update({'gain': head["e_gain"], 'readnoise': head["e_readn"], 'dark': head["e_drk"]})
+            if kwargs.get('print_params', True):
+                print(f"Science extraction parameters: {params}")
+            meta = ExtractionParams(
+                osample=params.get("osample", 10),
+                lambda_sf=params.get("lambda_sf", 1.0),
+                lambda_sp=params.get("lambda_sp", 0.0),
+                swath_width=params.get("swath_width"),
+            )
+
+            disable_tqdm = kwargs.get('disable_tqdm', True)
+            with patched_extract_tqdm(disable_tqdm):
+                spectrum = extract(im, traces, **params)
+            group_spectra[objname] = Spectra(header=head, data=spectrum, params=meta)
+
+        return group_spectra
+
+class BlazeNormalization(Step):
+    name = 'blaze'
+
+    @staticmethod
+    def run(group_spectra: dict[str, Spectra],
+            wave: np.ndarray,
+            blaze: np.ndarray,
+            free_spectral_range: np.ndarray,
+            **kwargs) -> dict[str, Spectra]:
+        """
+        Run the continuum normalization step on the provided spectra using traces and blaze function.
+        :param group_spectra: dict of Spectra objects, keyed by object name.
+        :param wave: Wavelength solution array of shape (n_trace, n_cols)
+        :param blaze: Blaze function array corresponding to the spectra of shape (n_trace, n_cols).
+        :param free_spectral_range: Free spectral range array corresponding to the spectra of shape (n_trace, 2).
+        :keyword print_params: If True, prints the supplied parameters used for continuum normalization.
+        :return: A new Spectra object containing the continuum-normalized spectra and associated metadata.
+        """
+        for objname, spectra in group_spectra.items():
+            data = []
+            for i, sp in enumerate(spectra.data):
+                sel = (wave[i] > free_spectral_range[i][0] - 1.0) & (wave[i] < free_spectral_range[i][1] + 1.0)
+                spec = (sp.spec / blaze[i])[sel]
+                sig = (sp.sig / blaze[i])[sel]
+                newsp = Spectrum(m=sp.m, spec=spec, sig=sig, wave=wave[i][sel], cont=blaze[i][sel])
+                data.append(newsp)
+            new_spectra = Spectra(header=spectra.header, data=data, params=spectra.params)
+            group_spectra[objname] = splice(new_spectra, simple=kwargs.get('simple', True))
+        return group_spectra
+
+
+class SensitivityFunction(Step):
+    name = 'sensitivity'
+
+    @staticmethod
+    def run(standard_spectra: Spectra,
+            reference_spectrum: Spectrum,
+            plot: bool = False):
+        """
+        Compute the sensitivity function by comparing the extracted standard star spectra to the reference spectra.
+        """
+        reference = make_interp_spline(reference_spectrum.wave, reference_spectrum.spec)
+        sens_funcs = []
+        for standard_spectrum in standard_spectra.data:
+            valid = np.isfinite(standard_spectrum.spec) & (standard_spectrum.spec > 0)
+            stdwave = standard_spectrum.wave[valid]
+            stdspec = standard_spectrum.spec[valid]
+            y = np.log10(reference(stdwave) / stdspec)
+            y_smooth = median_filter(y, size=51, mode='nearest')
+            fitter = FittingWithOutlierRemoval(LinearLSQFitter(), sigma_clip, niter=5, sigma=3)
+            sens, clipped = fitter(Chebyshev1D(degree=6), stdwave, y_smooth)
+            sens_funcs.append(sens)
+            if plot:
+                plt.figure()
+                plt.plot(stdwave, 10 ** y, alpha=0.2, label='ratio')
+                plt.plot(stdwave, 10 ** y_smooth, lw=1, label='ratio smoothed')
+                plt.plot(stdwave[clipped], 10 ** y_smooth[clipped], '.', ms=1, label='clipped')
+                plt.plot(stdwave, 10 ** sens(stdwave), label='sensitivity fit')
+                plt.xlabel('Wavelength (Angstrom)')
+                plt.ylabel('Reference flux / Observed counts')
+                plt.title('Sensitivity Function')
+                plt.legend()
+                plt.show()
+
+        return sens_funcs
+
+
+def splice(spectra: Spectra, simple=True, **kwargs):
+    """
+    Splice the orders of the provided spectra into a single 1D spectrum.
+    :param spectra: Spectra object containing the extracted spectra and associated metadata.
+    :param simple: If True, simply concatenate the orders without any weighting or overlap handling.
+    :return: A new Spectra object containing the spliced 1D spectrum and associated metadata.
+    """
+    wave, spec, sig, cont = np.array([]), np.array([]), np.array([]), np.array([])
+    waveorder = np.argsort([np.median(sp.wave) for sp in spectra.data])
+    for i, ind in enumerate(waveorder):
+        sp = spectra.data[ind]
+        if simple or i == 0:
+            wave = np.concatenate((wave, sp.wave))
+            spec = np.concatenate((spec, sp.spec))
+            sig = np.concatenate((sig, sp.sig))
+            cont = np.concatenate((cont, sp.cont))
+        else:
+            # outer loop already in ascending wavelength order
+            # get the spec median in the overlap region for the chain and new order
+            overlap_curr = (sp.wave >= wave[0]) & (sp.wave <= wave[-1] + 10.)
+            overlap_prev = (wave >= sp.wave[0] - 10.) & (wave <= sp.wave[-1])
+            median_curr = np.nanmedian(sp.spec[overlap_curr]) if np.any(overlap_curr) else 1.0
+            std_curr = np.nanstd(sp.spec[overlap_curr]) if np.any(overlap_curr) else 1.0
+            weight_curr = 1.0/(std_curr ** 2) if not np.isnan(std_curr) else 1.0
+            median_prev = np.median(spec[overlap_prev]) if np.any(overlap_prev) else 1.0
+            std_prev = np.std(spec[overlap_prev]) if np.any(overlap_prev) else 1.0
+            weight_prev = 1.0/(std_prev ** 2) if not np.isnan(std_prev) else 1.0
+            new_median = (median_curr * weight_curr + median_prev * weight_prev) / (weight_curr + weight_prev)
+            # scale both prev and curr to the new median everywhere
+            prev_fac = new_median / median_prev
+            curr_fac = new_median / median_curr
+            spec = np.concatenate((spec * prev_fac, sp.spec * curr_fac))
+            sig = np.concatenate((sig * prev_fac, sp.sig * curr_fac))
+            cont = np.concatenate((cont * prev_fac, sp.cont * curr_fac))
+            wave = np.concatenate((wave, sp.wave))
+
+    sorted_wv = np.argsort(wave)
+    new_spectrum = Spectrum(m=None, spec=spec[sorted_wv], sig=sig[sorted_wv], wave=wave[sorted_wv],
+                            cont=cont[sorted_wv])
+    return Spectra(header=spectra.header, data=[new_spectrum], params=spectra.params)
+
+
+# class ContinuumNormalizeWrapper(Step):
+#     name = 'continuum'
+
+    # @staticmethod
+    # def run(spectra: Spectra,
+    #         wave: np.ndarray,
+    #         blaze: np.ndarray,
+    #         *,
+    #         step_cfg: dict,
+    #         **kwargs) -> Spectra:
+    #     """
+    #     Run the continuum normalization step on the provided spectra using traces and blaze function.
+    #     :param spectra: Spectra object containing the extracted spectra and associated metadata.
+    #     :param wave: Wavelength solution array of shape (n_trace, n_cols)
+    #     :param blaze: Blaze function array corresponding to the spectra.
+    #     :param step_cfg: Dictionary containing the settings for the continuum normalization step.
+    #     :keyword print_params: If True, prints the supplied parameters used for continuum normalization.
+    #     :return: A new Spectra object containing the continuum-normalized spectra and associated metadata.
+    #     """
+    #     header = spectra.header
+    #     spectrum = spectra.data
+    #     spec = np.ma.masked_invalid([s.spec for s in spectrum])
+    #     sigma = np.ma.masked_invalid([s.sig for s in spectrum])
+    #     column = np.array([np.where(m==False)[0][[0,-1]] for m in spec.mask])
+    #
+    #     nspec = spec.shape[0]
+    #     # Align all arrays to the smallest count (norm_flat may skip edge traces)
+    #     nmin = min(nspec, len(blaze), len(wave) if wave is not None else nspec)
+    #     if nspec > nmin:
+    #         spec = spec[nspec - nmin:]
+    #         sigma = sigma[nspec - nmin:]
+    #         column = column[nspec - nmin:]
+    #         nspec = nmin
+    #     if wave is not None and len(wave) > nmin:
+    #         wave = wave[len(wave) - nmin:]
+    #     if len(blaze) > nmin:
+    #         blaze = blaze[len(blaze) - nmin:]
+    #
+    #     logger.info("Splicing orders")
+    #     spec, wave, blaze, sigma = splice_orders(spec, wave, blaze, sigma, scaling=True, plot=step_cfg['plot'],
+    #                                              plot_title=step_cfg['plot_title'])
+    #
+    #     logger.info("Normalizing continuum")
+    #     cont = continuum_normalize(spec, wave, blaze, sigma, plot=step_cfg['plot'], plot_title=step_cfg['plot_title'])
+    #     header["e_cont"] = (True, "CONT is a fitted continuum, orders spliced")
+    #
+    #     ntrace = spec.shape[0]
+    #     # Convert arrays to list[Spectrum], masking outside column range with NaN
+    #     spectra_list = []
+    #     for j in range(ntrace):
+    #         spec_row = np.array(spec[j], dtype=np.float32)
+    #         sig_row = np.array(sigma[j], dtype=np.float32)
+    #         wave_row = np.array(wave[j], dtype=np.float64) if wave is not None else None
+    #         cont_row = np.array(cont[j], dtype=np.float32) if cont is not None else None
+    #         # Apply column mask as NaN
+    #         if column is not None:
+    #             spec_row[: column[j, 0]] = np.nan
+    #             spec_row[column[j, 1]:] = np.nan
+    #             sig_row[: column[j, 0]] = np.nan
+    #             sig_row[column[j, 1]:] = np.nan
+    #         spectra_list.append(Spectrum(m=j, spec=spec_row, sig=sig_row, wave=wave_row, cont=cont_row))
+    #
+    #     return Spectra(header=header, data=spectra_list)
