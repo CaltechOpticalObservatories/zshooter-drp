@@ -11,14 +11,15 @@ flat:
 trace:
   degree: 4
   bias_scaling: exposure_time
-  filter_y: 30
+  filter_y: 20
   filter_type: gaussian
   min_cluster: 20000
   noise_relative: 0.001
-  border_width: 40
+  border_width: 0
   manual: false
   min_width: 0.5
   split_sigma: 5
+  plot: True
 
 #scatter:
 #  bias_scaling: exposure_time
@@ -26,50 +27,51 @@ trace:
 #  border_width: 20
 
 norm_flat:
-#  smooth_slitfunction: 2
-#  smooth_spectrum: 0
-  extraction_height: 0.9
-  swath_width: 200
+  extraction_height: 50
   threshold: 100
+  plot: False
 
 curvature:
   dimensionality: 2D
   curve_degree: 1
-  degree: [1, 1]
-  curve_height: 20
-  extraction_height: 10
+  degree: [3, 3]
+  curve_height: 10
+  extraction_height: 50
   peak_width: 1
-  peak_threshold: 100
+  peak_threshold: 10
+  plot: False
 
 wavecal_master:
   extraction_method: simple
-  extraction_height: 30
-  bias_scaling: exposure_time
+  extraction_height: 50
+  plot: False
 
 wavecal_init:
   atlas: "thar"
-  medium: 'vac'
-  resid_delta: 2000
-  edge_margin: 10
-  width_min: 0.01
-  width_max: 8
+  medium: 'air'
+  resid_delta: 100000
+  smoothing: 1
+  edge_margin: 0
   wave_delta: 20
-  cutoff: 0.0001
+  cutoff: 0.001
+  match_tolerance: 1.0
   plot: False
 
 wavecal:
-  threshold: 100
-  iterations: 3
-  dimensionality: 2D
-  degree: [5, 5]
-  manual: false
-  shift_window: 0
+  atlas: "thar"
+  threshold: 200
+  dimensionality: 1D
+  shift_window: 0.0
+  nstep: 1
+  degree: 4
+  plot: True
 
 science:
-  bias_scaling: exposure_time
-  oversampling: 10
-  extraction_height: 1
-  swath_width: 200
-  smooth_slitfunction: 2
-  smooth_spectrum: 0
-  maxiter: 5
+#  bias_scaling: exposure_time
+#  oversampling: 10
+  extraction_height: 40
+#  swath_width: 200
+#  smooth_slitfunction: 2
+#  smooth_spectrum: 0.1
+#  maxiter: 5
+  plot: False
