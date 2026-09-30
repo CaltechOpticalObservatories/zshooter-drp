@@ -69,9 +69,9 @@ wavecal:
 science:
 #  bias_scaling: exposure_time
 #  oversampling: 10
-  extraction_height: 40
+  extraction_height: 10
 #  swath_width: 200
 #  smooth_slitfunction: 2
 #  smooth_spectrum: 0.1
 #  maxiter: 5
-  plot: False
+  plot: True

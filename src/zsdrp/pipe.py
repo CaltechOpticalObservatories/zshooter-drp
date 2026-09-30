@@ -170,6 +170,7 @@ def _run_per_channel_reduction(instrument: ZSHOOTER, channel: str, channel_cfg: 
                        f"cannot perform blaze normalization.")
     else:
         logger.info(f"Performing blaze normalization for channel {channel}.")
+        free_spectral_range = free_spectral_range[1:] if channel=='RED' else free_spectral_range # TODO: Hack for now
         group_spectra = BlazeNormalization.run(group_spectra, chanres['wave_img'], chanres['blaze'], free_spectral_range)
         chanres.update({'spectra': group_spectra, 'level': 1})
 
@@ -227,7 +228,7 @@ def run_reduction(files: dict[Channel, dict[str, Any]],
     # run reduction for each channel
     results = dict() # for per channel intermediate results and calibration products
     for channel in channels:
-        logger.info(f"Running reduction for channel {channel}...")
+        print(f"Running reduction for channel {channel}...")
         if channel not in files:
             logger.warning(f"No files found for channel {channel}, skipping reduction for this channel.")
             continue
@@ -251,8 +252,8 @@ def run_reduction(files: dict[Channel, dict[str, Any]],
 
 
 def run_flux_calibration_and_stitch(results: dict,
-                                    reference_wave: np.ndarray,
-                                    reference_flux: np.ndarray,
+                                    reference_wave: Optional[np.ndarray] = None,
+                                    reference_flux: Optional[np.ndarray] = None,
                                     standard_star_name: str = "STANDARD",
                                     plot: bool = True,
                                     output_dir: Optional[str] = None):
@@ -266,7 +267,10 @@ def run_flux_calibration_and_stitch(results: dict,
     :param output_dir: Directory to save the output files. If None, no files will be saved.
     """
     # create reference spectrum object
-    reference_spectrum = Spectrum(spec=reference_flux, wave=reference_wave, m=None, sig=None)
+    if reference_wave is not None and reference_flux is not None:
+        reference_spectrum = Spectrum(spec=reference_flux, wave=reference_wave, m=None, sig=None)
+    else:
+        reference_spectrum = None
 
     # validate output_dir
     if output_dir is not None and Path(output_dir).resolve().is_dir():
@@ -278,10 +282,10 @@ def run_flux_calibration_and_stitch(results: dict,
     for channel, chanres in results.items():
         # check if standard cal is present, is blaze normalized, and reference spectrum is present
         group_spectra = chanres.get("spectra", {})
-        standard_spectra = group_spectra.pop(standard_star_name.upper(), None)
+        standard_spectra = group_spectra.get(standard_star_name.upper(), None)
 
         sens_func = None
-        if standard_spectra is None:
+        if standard_spectra is None or reference_spectrum is None:
             logger.warning(f"Standard star spectrum with object name {standard_star_name.upper()} not observed, "
                            f"skipping flux calibration.")
         elif chanres.get("level", 0) == 0:
@@ -295,7 +299,10 @@ def run_flux_calibration_and_stitch(results: dict,
         for objname, spectra in group_spectra.items():
             newsp = []
             for sp in spectra.data:
-                factor = 10 ** sens_func(sp.wave) if sens_func is not None else 1.0
+                if sens_func is None or objname==standard_star_name.upper():
+                    factor = 1.0
+                else:
+                    factor = 10 ** sens_func(sp.wave)
                 sp.spec *= factor
                 sp.sig *= factor
                 newsp.append(sp)

@@ -559,8 +559,8 @@ def splice(spectra: Spectra, simple=True, **kwargs):
             median_curr = np.nanmedian(sp.spec[overlap_curr]) if np.any(overlap_curr) else 1.0
             std_curr = np.nanstd(sp.spec[overlap_curr]) if np.any(overlap_curr) else 1.0
             weight_curr = 1.0/(std_curr ** 2) if not np.isnan(std_curr) else 1.0
-            median_prev = np.median(spec[overlap_prev]) if np.any(overlap_prev) else 1.0
-            std_prev = np.std(spec[overlap_prev]) if np.any(overlap_prev) else 1.0
+            median_prev = np.nanmedian(spec[overlap_prev]) if np.any(overlap_prev) else 1.0
+            std_prev = np.nanstd(spec[overlap_prev]) if np.any(overlap_prev) else 1.0
             weight_prev = 1.0/(std_prev ** 2) if not np.isnan(std_prev) else 1.0
             new_median = (median_curr * weight_curr + median_prev * weight_prev) / (weight_curr + weight_prev)
             # scale both prev and curr to the new median everywhere

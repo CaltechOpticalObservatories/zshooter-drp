@@ -1,6 +1,6 @@
 trace:
-  filter_y: 10
-  border_width: 50
+  filter_y: 3
+  border_width: [50, 400, 50, 50]
 
 wavecal_init:
   atlas: "zshooter"
