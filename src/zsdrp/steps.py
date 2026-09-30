@@ -7,8 +7,8 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 
 from astropy.io import fits
-from astropy.modeling.fitting import FittingWithOutlierRemoval, LinearLSQFitter
-from astropy.modeling.models import Chebyshev1D
+from astropy.modeling.fitting import FittingWithOutlierRemoval, LinearLSQFitter, SplineExactKnotsFitter
+from astropy.modeling.models import Chebyshev1D, Spline1D
 from scipy.ndimage import median_filter
 from astropy.stats import sigma_clip
 from scipy.interpolate import make_interp_spline
@@ -575,3 +575,34 @@ def splice(spectra: Spectra, simple=True, **kwargs):
     new_spectrum = Spectrum(m=None, spec=spec[sorted_wv], sig=sig[sorted_wv], wave=wave[sorted_wv],
                             cont=cont[sorted_wv])
     return Spectra(header=spectra.header, data=[new_spectrum], params=spectra.params)
+
+
+def fit_smooth_continuum(x, y, degree=3, n_knots=10, sigma=3.0, median_window=51, niter=5):
+    """
+    Fit a smooth continuum to log10(y) using a spline with iterative sigma clipping.
+    FittingWithOutlierRemoval can't wrap the astropy spline fitters, so clipping is done here.
+    :param x: 1D array of x values (e.g., wavelength).
+    :param y: 1D array of y values (e.g., flux). Non-positive and non-finite values are ignored.
+    :param degree: Degree of the spline (1-5).
+    :param n_knots: Number of interior knots; fewer knots give a smoother fit.
+    :param sigma: Number of standard deviations to use for outlier rejection.
+    :param median_window: Size of the median filter window (pixels), applied before fitting.
+    :param niter: Maximum number of fit/clip iterations.
+    :return: Fitted Spline1D model of log10(y); evaluate as 10 ** model(x).
+    """
+    valid = np.isfinite(x) & np.isfinite(y) & (y > 0)
+    order = np.argsort(x[valid])
+    x_valid = x[valid][order]
+    ys = median_filter(np.log10(y[valid][order]), size=median_window, mode='nearest')
+
+    fitter = SplineExactKnotsFitter()
+    keep = np.ones(len(x_valid), dtype=bool)
+    for _ in range(niter):
+        # knots at quantiles of the kept points, so every knot interval still has data after clipping
+        knots = np.quantile(x_valid[keep], np.linspace(0, 1, n_knots + 2)[1:-1])
+        cont_fit = fitter(Spline1D(degree=degree), x_valid[keep], ys[keep], t=knots)
+        new_keep = ~sigma_clip(ys - cont_fit(x_valid), sigma=sigma).mask
+        if np.array_equal(new_keep, keep):
+            break
+        keep = new_keep
+    return cont_fit

@@ -311,7 +311,7 @@ def run_flux_calibration_and_stitch(results: dict,
 
             if output_dir is not None:
                 suffix = "_raw" if lvl == 0 else "_blazecal" if lvl == 1 else "_fluxcal"
-                new_spectra.save(f"{output_dir}/spectra_{objname}_{channel}{suffix}.fits", steps=steps_run)
+                # new_spectra.save(f"{output_dir}/spectra_{objname}_{channel}{suffix}.fits", steps=steps_run)
                 save_spectra_to_ascii(new_spectra, f"{output_dir}/spectra_{objname}_{channel}{suffix}.txt")
 
     # stitch all objects across channels
