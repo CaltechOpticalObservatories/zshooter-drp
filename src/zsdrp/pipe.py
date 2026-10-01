@@ -298,13 +298,14 @@ def run_flux_calibration_and_stitch(results: dict,
         steps_run = chanres.get("steps_run", [])
         for objname, spectra in group_spectra.items():
             newsp = []
+            exptime = spectra.header.get("EXPTIME", 1.0)
             for sp in spectra.data:
                 if sens_func is None or objname==standard_star_name.upper():
                     factor = 1.0
                 else:
                     factor = 10 ** sens_func(sp.wave)
-                sp.spec *= factor
-                sp.sig *= factor
+                sp.spec *= factor / exptime
+                sp.sig *= factor / exptime
                 newsp.append(sp)
             new_spectra = Spectra(data=newsp, header=spectra.header)
             objects[objname] = objects.get(objname, []) + [new_spectra]

@@ -511,10 +511,12 @@ class SensitivityFunction(Step):
         """
         reference = make_interp_spline(reference_spectrum.wave, reference_spectrum.spec)
         sens_funcs = []
+
+        exptime = standard_spectra.header.get('EXPTIME', 1.0)
         for standard_spectrum in standard_spectra.data:
             valid = np.isfinite(standard_spectrum.spec) & (standard_spectrum.spec > 0)
             stdwave = standard_spectrum.wave[valid]
-            stdspec = standard_spectrum.spec[valid]
+            stdspec = standard_spectrum.spec[valid] / float(exptime)
             y = np.log10(reference(stdwave) / stdspec)
             y_smooth = median_filter(y, size=51, mode='nearest')
             fitter = FittingWithOutlierRemoval(LinearLSQFitter(), sigma_clip, niter=5, sigma=3)
@@ -554,21 +556,21 @@ def splice(spectra: Spectra, simple=True, **kwargs):
         else:
             # outer loop already in ascending wavelength order
             # get the spec median in the overlap region for the chain and new order
-            overlap_curr = (sp.wave >= wave[0]) & (sp.wave <= wave[-1] + 10.)
-            overlap_prev = (wave >= sp.wave[0] - 10.) & (wave <= sp.wave[-1])
-            median_curr = np.nanmedian(sp.spec[overlap_curr]) if np.any(overlap_curr) else 1.0
-            std_curr = np.nanstd(sp.spec[overlap_curr]) if np.any(overlap_curr) else 1.0
-            weight_curr = 1.0/(std_curr ** 2) if not np.isnan(std_curr) else 1.0
-            median_prev = np.nanmedian(spec[overlap_prev]) if np.any(overlap_prev) else 1.0
-            std_prev = np.nanstd(spec[overlap_prev]) if np.any(overlap_prev) else 1.0
-            weight_prev = 1.0/(std_prev ** 2) if not np.isnan(std_prev) else 1.0
-            new_median = (median_curr * weight_curr + median_prev * weight_prev) / (weight_curr + weight_prev)
+            overlap_curr = (sp.wave >= wave[0]) & (sp.wave <= max(wave[-1] + 10., sp.wave[int(0.05 * len(sp.wave))]))
+            overlap_prev = (wave >= min(sp.wave[0] - 10., wave[int(0.95 * len(wave))])) & (wave <= sp.wave[-1])
+            median_curr = np.nanmedian(sp.spec[overlap_curr])
+            # std_curr = np.nanstd(sp.spec[overlap_curr]) if np.any(overlap_curr) else 1.0
+            # weight_curr = 1.0/(std_curr ** 2) if not np.isnan(std_curr) else 1.0
+            median_prev = np.nanmedian(spec[overlap_prev])
+            # std_prev = np.nanstd(spec[overlap_prev]) if np.any(overlap_prev) else 1.0
+            # weight_prev = 1.0/(std_prev ** 2) if not np.isnan(std_prev) else 1.0
+            # new_median = (median_curr * weight_curr + median_prev * weight_prev) / (weight_curr + weight_prev)
             # scale both prev and curr to the new median everywhere
-            prev_fac = new_median / median_prev
-            curr_fac = new_median / median_curr
-            spec = np.concatenate((spec * prev_fac, sp.spec * curr_fac))
-            sig = np.concatenate((sig * prev_fac, sp.sig * curr_fac))
-            cont = np.concatenate((cont * prev_fac, sp.cont * curr_fac))
+            # prev_fac = new_median / median_prev
+            curr_fac = median_prev / median_curr
+            spec = np.concatenate((spec, sp.spec * curr_fac))
+            sig = np.concatenate((sig, sp.sig * curr_fac))
+            cont = np.concatenate((cont, sp.cont * curr_fac))
             wave = np.concatenate((wave, sp.wave))
 
     sorted_wv = np.argsort(wave)

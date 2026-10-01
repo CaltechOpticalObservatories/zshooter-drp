@@ -1,8 +1,8 @@
 trace:
-  filter_y: 3
+  filter_y: 2
   min_cluster: 20000
-#  filter_type: boxcar
-  border_width: [200, 0, 50, 50]
+  border_width: [100, 0, 50, 50]
+  closing_shape: [1, 2]
 
 curvature:
   window_width: 30
