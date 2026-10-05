@@ -97,7 +97,7 @@ def _reduce_cals(instrument: ZSHOOTER, channel: str, channel_cfg: dict, arc_file
     res.update({'norm': norm, 'blaze': blaze, 'slitfunc': slitfunc, 'slitfunc_meta': slitfunc_meta})
 
     # wavecal
-    wave_img, wavesol, linelist, metrics = None, None, None, None
+    wave_img, arc_lines = None, None
     if ReductionStep.WAVECAL in disable_steps:
         logger.warning(f"Wavecal step is disabled. Skipping wavelength calibration.")
     elif arc_files is None or len(arc_files) == 0:
@@ -106,17 +106,10 @@ def _reduce_cals(instrument: ZSHOOTER, channel: str, channel_cfg: dict, arc_file
     else:
         arc = combine_calibrate(files=list(arc_files), instrument=instrument, channel=channel, bias=bias,
                                 bhead=bhead, norm=norm, traces=traces)
-        step = ReductionStep.WAVECAL.value
-        master_cfg = channel_cfg[f'{step}_master']
-        init_cfg = channel_cfg[f'{step}_init']
-        cfg = channel_cfg[step]
-        wave_img, wavesol, linelist, metrics = WavecalWrapper.run(arc[0], arc[1], traces, instrument=instrument,
-                                                                  channel=channel, master_step_cfg=master_cfg,
-                                                                  init_step_cfg=init_cfg, step_cfg=cfg,
-                                                                  **kwargs)
+        wave_img, arc_lines = simple_wavesol(arc[0], arc[1], traces)
         if output_dir is not None:
-            WavecalWrapper.save(wave_img, wavesol, filename=f"{output_dir}/wavecal_{channel}.npz")
-    res.update({'wave_img': wave_img, 'wavesol': wavesol, 'linelist': linelist, 'metrics': metrics})
+            np.savez(f"{output_dir}/wavecal_{channel}.npz", wave_img=wave_img)
+    res.update({'wave_img': wave_img, 'arc_lines': arc_lines})
 
     return res
 
@@ -141,9 +134,10 @@ def _run_per_channel_reduction(instrument: ZSHOOTER, channel: str, channel_cfg: 
         try:
             traces = TraceWrapper.load(f"{output_dir}/trace_{channel}.fits")
             norm, blaze, slitfunc, slitfunc_meta = NormflatWrapper.load(f"{output_dir}/norm_{channel}.npz")
-            wave_img, wavesol = WavecalWrapper.load(f"{output_dir}/wavecal_{channel}.npz")
+            with np.load(f"{output_dir}/wavecal_{channel}.npz") as data:
+                wave_img = data['wave_img']
             chanres.update({'traces': traces, 'norm': norm, 'blaze': blaze, 'slitfunc': slitfunc,
-                            'slitfunc_meta': slitfunc_meta, 'wave_img': wave_img, 'wavesol': wavesol})
+                            'slitfunc_meta': slitfunc_meta, 'wave_img': wave_img})
         except Exception as e:
             logger.warning(f"Could not load traces for channel {channel} from {output_dir}. "
                            f"Will attempt to reduce calibration files. Error: {e}")
@@ -298,7 +292,7 @@ def run_flux_calibration_and_stitch(results: dict,
         steps_run = chanres.get("steps_run", [])
         for objname, spectra in group_spectra.items():
             newsp = []
-            exptime = spectra.header.get("EXPTIME", 1.0)
+            exptime = float(spectra.header.get("EXPTIME", 1.0))
             for sp in spectra.data:
                 if sens_func is None or objname==standard_star_name.upper():
                     factor = 1.0

@@ -1,28 +1,40 @@
-import numpy as np
-import os
 import logging
+import os
 from abc import ABC, abstractmethod
-from typing import Optional, Sequence
+from collections.abc import Sequence
 from pathlib import Path
-import matplotlib.pyplot as plt
 
+import matplotlib.pyplot as plt
+import numpy as np
+import yaml
+from astropy.constants import c as speed_of_light
 from astropy.io import fits
-from astropy.modeling.fitting import FittingWithOutlierRemoval, LinearLSQFitter, SplineExactKnotsFitter
+from astropy.table import Table
+from astropy.wcs import WCS
+from astropy.modeling.fitting import (
+    FittingWithOutlierRemoval,
+    LinearLSQFitter,
+)
 from astropy.modeling.models import Chebyshev1D, Spline1D
-from scipy.ndimage import median_filter
 from astropy.stats import sigma_clip
+from pyreduce.combine_frames import combine_bias, combine_calibrate
+from pyreduce.extract import extract, extract_normalize
+from pyreduce.instruments.common import Instrument
+from pyreduce.slit_curve import Curvature
+from pyreduce.spectra import ExtractionParams, Spectra, Spectrum
+from pyreduce.trace import trace
+from pyreduce.trace_model import load_traces, save_traces
+from pyreduce.wavelength_calibration import (
+    WavelengthCalibration,
+    WavelengthCalibrationInitialize,
+)
 from scipy.interpolate import make_interp_spline
+from scipy.ndimage import median_filter
+from scipy.optimize import curve_fit
+from scipy.signal import find_peaks
+from scipy.special import erf
 
 from zsdrp.utils import patched_extract_tqdm
-
-from pyreduce.combine_frames import combine_calibrate, combine_bias
-from pyreduce.trace import trace
-from pyreduce.trace_model import save_traces, load_traces
-from pyreduce.slit_curve import Curvature
-from pyreduce.extract import extract_normalize, extract
-from pyreduce.wavelength_calibration import WavelengthCalibrationInitialize, WavelengthCalibration
-from pyreduce.spectra import ExtractionParams, Spectra, Spectrum
-from pyreduce.instruments.common import Instrument
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +44,6 @@ class Step(ABC):
     @abstractmethod
     def run(*args, **kwargs):
         """ Main step logic goes here. This method should be overridden by subclasses. """
-        pass
 
     @staticmethod
     def save(*args, **kwargs):
@@ -50,11 +61,11 @@ class MaskWrapper(Step):
     name = 'mask'
 
     @staticmethod
-    def run(filename: Optional[str | Path] = None,
+    def run(filename: str | Path | None = None,
             *,
-            instrument: Optional[Instrument] = None,
-            channel: Optional[str] = None,
-            default_shape: Optional[tuple[int, int]] = None
+            instrument: Instrument | None = None,
+            channel: str = '',
+            default_shape: tuple[int, int] | None = None
             ) -> np.ndarray:
         """
         Loads and returns a mask from a .npz or .npy file. Returns a default mask of zeros if filename is None, or
@@ -86,25 +97,23 @@ class MaskWrapper(Step):
             np.savez(filename, **masks)
 
     @staticmethod
-    def load(filename: str, channel: Optional[str]=None) -> np.ndarray | None:
+    def load(filename: str, channel: str = '') -> np.ndarray | None:
         if not os.path.exists(filename):
             raise FileNotFoundError(f"File not found: {filename}")
-        try:
-            with np.load(filename, allow_pickle=True) as data:
-                if '.npy' in filename:
-                    return data
+
+        with np.load(filename, allow_pickle=True) as data:
+            if '.npy' in filename:
+                return data
+            else:
+                if channel != '' and channel in data:
+                    logger.info(f"Loading mask from {filename}, at key '{channel}'")
+                    return data[channel]
+                elif 'mask' in data:
+                    logger.info(f"Loading mask from {filename}, at key 'mask'")
+                    return data['mask']
                 else:
-                    if channel and channel in data:
-                        logger.info(f"Loading mask from {filename}, at key '{channel}'")
-                        return data[channel]
-                    elif 'mask' in data:
-                        logger.info(f"Loading mask from {filename}, at key 'mask'")
-                        return data['mask']
-                    else:
-                        raise ValueError(f"Neither key 'mask' nor {channel} found in {filename}, "
-                                         f"save the mask with the appropriate key.")
-        except:
-            raise ValueError(f"Unsupported file format for {filename}. Only .npz and .npy are supported.")
+                    raise ValueError(f"Neither key 'mask' nor {channel} found in {filename}, "
+                                     f"save the mask with the appropriate key.")
 
 
 class BiasWrapper(Step):
@@ -136,8 +145,8 @@ class FlatWrapper(Step):
     def run(filenames: Sequence[str], *,
             instrument: Instrument,
             channel: str,
-            bias: Optional[np.ndarray] = None,
-            bhead: Optional[dict] = None,
+            bias: np.ndarray | None = None,
+            bhead: dict | None = None,
             step_cfg: dict,
             **kwargs):
         """
@@ -145,6 +154,9 @@ class FlatWrapper(Step):
         :param filenames: List of filenames to process.
         :param instrument: The instrument to use for the flat step.
         :param channel: The channel to use for the flat step.
+        :param bias: Optional bias for the flat step.
+        :param bhead: Optional bias for the flat step.
+        :param step_cfg: Dictionary containing the settings for the flat step.
         :return: The result of the flat step.
         """
         if filenames is None or len(filenames) == 0:
@@ -163,7 +175,7 @@ class TraceWrapper(Step):
     def run(image: np.ndarray,
             *,
             step_cfg: dict,
-            order_centers: Optional[dict[int, int | float]] = None,
+            order_centers: dict[int, int | float] | None = None,
             **kwargs):
         """
         Run the tracing step on the provided image using the specified configuration.
@@ -175,7 +187,7 @@ class TraceWrapper(Step):
         :return: A list of Trace objects representing the traced orders in the image.
         """
         mapping = {'split_sigma': 'sigma'}
-        params = {mapping.get(k,k): v for k, v in step_cfg.items()}
+        params = {mapping.get(k, k): v for k, v in step_cfg.items()}
         params.pop('bias_scaling') if 'bias_scaling' in params else None
         params.pop('norm_scaling') if 'norm_scaling' in params else None
         params['order_centers'] = order_centers
@@ -212,7 +224,7 @@ class CurvatureWrapper(Step):
         :return: The updated list of Trace objects with curvature information added.
         """
         mapping = {'degree': 'fit_degree', 'curvature_cutoff': 'sigma_cutoff', 'dimensionality': 'mode'}
-        params = {mapping.get(k,k): v for k, v in step_cfg.items()}
+        params = {mapping.get(k, k): v for k, v in step_cfg.items()}
         params.pop('bias_scaling') if 'bias_scaling' in params else None
         params.pop('norm_scaling') if 'norm_scaling' in params else None
         params.pop('extraction_method') if 'extraction_method' in params else None
@@ -257,7 +269,7 @@ class NormflatWrapper(Step):
         """
         mapping = {'smooth_slitfunction': 'lambda_sf', 'smooth_spectrum': 'lambda_sp', 'oversampling': 'osample',
                    'extraction_reject': 'reject_threshold'}
-        params = {mapping.get(k,k): v for k, v in step_cfg.items()}
+        params = {mapping.get(k, k): v for k, v in step_cfg.items()}
         params['reject_threshold'] = params.get('reject_threshold', 6)
         params.update({'gain': header["e_gain"], 'readnoise': header["e_readn"], 'dark': header["e_drk"]})
         params['scatter'] = kwargs.get('scatter', None)
@@ -266,7 +278,7 @@ class NormflatWrapper(Step):
 
         disable_tqdm = kwargs.get('disable_tqdm', True)
         with patched_extract_tqdm(disable_tqdm):
-            norm, _, blaze, slitfunc, column_range = extract_normalize(image, traces, **params)
+            norm, _, blaze, slitfunc, _ = extract_normalize(image, traces, **params)
 
         blaze = np.ma.filled(blaze, 0)
         norm = np.ma.filled(norm, 1)
@@ -286,7 +298,7 @@ class NormflatWrapper(Step):
     def save(norm, blaze, slitfunc, slitfunc_meta, filename):
         os.makedirs(os.path.dirname(filename), exist_ok=True)
         np.savez(filename, norm=norm, blaze=blaze, slitfunc=np.array(slitfunc, dtype=object),
-                        slitfunc_meta=slitfunc_meta)
+                 slitfunc_meta=slitfunc_meta)
 
     @staticmethod
     def load(filename):
@@ -380,7 +392,7 @@ class WavecalWrapper(Step):
             else:
                 for idx_in_group, t in enumerate(traces):
                     t.m = obase + idx_in_group
-                logger.info("Updated trace order numbers with obase=%d",obase)
+                logger.info("Updated trace order numbers with obase=%d", obase)
         return wlen, wave, linelist, metrics
 
     @staticmethod
@@ -402,6 +414,163 @@ class WavecalWrapper(Step):
             raise ValueError(f"Unsupported file format, only .npz is supported: {filename}")
 
 
+def simple_wavesol(image: np.ndarray,
+                   header: fits.Header,
+                   traces: list,
+                   *,
+                   lamp_files: Sequence[str] = ("ThAr_lines.dat", "Ne_IR_MOSFIRE_lines.dat", "Ar_IR_MOSFIRE_lines.dat"),
+                   min_snr: float = 30.0,
+                   blend_pix: float = 12.0,
+                   blend_ratio: float = 0.01,
+                   halfwin: int = 7,
+                   min_lines: int = 10,
+                   min_lines_order: int = 8):
+    """
+    Wavelength solution from the ScopeSim analytical trace list that generated the frames, corrected with the arc
+    lines exactly as in echelle_reduction.py (ChannelGeometry, arc_check, apply_wavelength_correction).
+
+    Every pixel of an order's bounding box gets a wavelength and slit position xi from the configured SpectralTrace
+    through the detector WCS (key 'D'). The arc spectrum of an order is the mean over slit pixels with |xi| < 4 arcsec
+    (pixels shared by two orders excluded), at the wavelength of the row closest to xi = 0. Lines are fitted with the
+    slit profile (top-hat convolved with a Gaussian) over +-`halfwin` pixels and matched to the lamp line list the
+    arcs were simulated from; lines with another list line of more than `blend_ratio` of their amplitude within
+    `blend_pix` pixels, or with SNR below `min_snr`, are rejected. dpix = (measured - list) / dispersion. A
+    channel-wide a + b x/nx is fitted first; orders with at least `min_lines_order` lines then get their own linear
+    term in x, the others a constant, and the corrected wavelength is model - dpix * dispersion. With fewer than
+    `min_lines` lines the model is returned uncorrected.
+    :param image: Combined arc image (bias subtracted).
+    :param header: Header of the combined arc, carrying the detector WCS, image plane ID, irdb package path, gain and
+                   read noise.
+    :param traces: pyreduce Trace objects; the solution is evaluated along their centres, one row per valid trace.
+    :param lamp_files: Lamp line tables in the irdb package lamp_lines/ directory that the arc source was built from.
+    :return: Wavelength image in Angstrom of shape (n_trace, n_cols), and a Table of the arc lines measured on the
+             uncorrected model (order, line, dlam, dpix, dv, snr, centre_err_pix, width_pix, x, y).
+    """
+    from scopesim.effects import EchelleSpectralTraceList
+
+    inst_dir = Path(header['SIM CONFIG SIM file local_packages_path']) / header['INSTRUME']
+    with open(inst_dir / 'ZShooter_SPEC.yaml') as f:
+        effect = next(e for e in yaml.safe_load(f)['effects'] if e['name'] == 'trace_list_analytical')
+    trace_list = EchelleSpectralTraceList(**{**effect['kwargs'], 'filename': str(inst_dir / effect['kwargs']['filename'])})
+    spectral_traces = [st for st in trace_list.spectral_traces.values() if st.meta['image_plane_id'] == int(header['ID'])]
+
+    # lamp line list, amplitudes normalised per file as when the arc source was built
+    tables = [Table.read(inst_dir / 'lamp_lines' / name, delimiter='|', format='ascii', header_start=0) for name in lamp_files]
+    line_waves = np.concatenate([np.asarray(t['wave'], dtype=float) for t in tables])
+    line_amps = np.concatenate([np.asarray(t['amplitude'], dtype=float) / np.nanmax(t['amplitude']) for t in tables])
+    line_amps, line_waves = line_amps[np.argsort(line_waves)], np.sort(line_waves)
+
+    # per-pixel wavelength [A] and slit position [arcsec] in each order's bounding box
+    wcs = WCS(header, key='D')
+    ny, nx = image.shape
+    orders = []
+    for st in spectral_traces:
+        xpix, ypix = wcs.all_world2pix(*st.footprint(), 0)
+        x0, x1 = int(np.clip(np.floor(xpix.min()) - 2, 0, nx)), int(np.clip(np.ceil(xpix.max()) + 3, 0, nx))
+        y0, y1 = int(np.clip(np.floor(ypix.min()) - 2, 0, ny)), int(np.clip(np.ceil(ypix.max()) + 3, 0, ny))
+        if x1 - x0 < 20 or y1 - y0 < 10:
+            continue
+        xmm, ymm = wcs.all_pix2world(*np.meshgrid(np.arange(x0, x1), np.arange(y0, y1)), 0)
+        lam = st.xy2lam(xmm, ymm) * 1e4
+        xi = st.xy2xi(xmm, ymm)
+        inside = (np.abs(xi) <= np.abs(st.table['s']).max()) & (lam >= st.wave_min * 1e4) & (lam <= st.wave_max * 1e4)
+        orders.append(dict(trace=st, x0=x0, y0=y0, slices=(slice(y0, y1), slice(x0, x1)), lam=lam, xi=xi, inside=inside,
+                           dlam=np.abs(np.gradient(lam, axis=1))))
+    claims = np.zeros(image.shape, dtype=np.int16)
+    for o in orders:
+        claims[o['slices']] += o['inside']
+    overlap = claims > 1
+
+    # arc_check: fit line centres per order and compare with the line list through the model wavelengths
+    gain, readnoise = header['e_gain'], header['e_readn']
+    rows = []
+    for o in orders:
+        sub = image[o['slices']]
+        good = o['inside'] & ~overlap[o['slices']] & (np.abs(o['xi']) < 4.0)
+        npix = good.sum(axis=0)
+        ok = npix > 20
+        if ok.sum() < 100:
+            continue
+        spec = np.where(ok, (sub * good).sum(axis=0) / np.maximum(npix, 1) * np.median(npix[ok]), 0.0)
+        noise = np.sqrt(np.maximum(spec, 0) * gain + np.median(npix[ok]) * readnoise ** 2) / gain
+        centre_row = np.argmin(np.abs(o['xi']), axis=0)
+        cols = np.arange(sub.shape[1])
+        lam_col = o['lam'][centre_row, cols]
+        dlam_col = o['dlam'][centre_row, cols]
+        peaks, _ = find_peaks(spec, prominence=max(10 * np.median(spec[ok]), 50.0), distance=6)
+        for p in peaks[(peaks > halfwin + 2) & (peaks < spec.size - halfwin - 3)]:
+            win = np.arange(p - halfwin, p + halfwin + 1)
+            background = 0.5 * (spec[p - halfwin - 2] + spec[p + halfwin + 2])
+            p0 = [spec[p] - background, p, 4.4, 0.6, background]
+            bounds = ([0, p - 2.5, 2.5, 0.2, -np.inf], [np.inf, p + 2.5, 7.0, 2.5, np.inf])
+            try:
+                popt, pcov = curve_fit(slit_line_profile, win, spec[win], p0=p0, sigma=noise[win], bounds=bounds, maxfev=4000)
+            except (RuntimeError, ValueError):
+                continue
+            amplitude, centre, width = popt[0], popt[1], popt[2]
+            snr = amplitude * width / np.sqrt((noise[win] ** 2).sum())
+            if snr < min_snr or not np.isfinite(pcov[1, 1]):
+                continue
+            lam_meas = np.interp(centre, cols, lam_col)
+            k = np.searchsorted(line_waves, lam_meas)
+            candidates = slice(max(k - 1, 0), k + 1)
+            line_idx = candidates.start + np.argmin(np.abs(line_waves[candidates] - lam_meas))
+            line = line_waves[line_idx]
+            if abs(lam_meas - line) > 3 * dlam_col[p]:
+                continue
+            near = (np.abs(line_waves - line) < blend_pix * dlam_col[p]) & (np.arange(line_waves.size) != line_idx)
+            if (line_amps[near] > blend_ratio * line_amps[line_idx]).any():
+                continue
+            dpix = (lam_meas - line) / dlam_col[p]
+            rows.append((o['trace'].trace_id, line, lam_meas - line, dpix, (lam_meas - line) / line * speed_of_light.to_value("m/s"),
+                         snr, np.sqrt(pcov[1, 1]), width, o['x0'] + centre, o['y0'] + centre_row[p]))
+    names = ["order", "line", "dlam", "dpix", "dv", "snr", "centre_err_pix", "width_pix", "x", "y"]
+    arcs = Table(rows=rows, names=names) if rows else Table(names=names, dtype=[str] + [float] * 9)
+
+    # apply_wavelength_correction: channel-wide a + b x/nx, then a per-order linear term or constant
+    corrections = {}
+    if len(arcs) >= min_lines:
+        xn = np.asarray(arcs["x"], dtype=float) / nx
+        d = np.asarray(arcs["dpix"], dtype=float)
+        w = 1 / np.maximum(np.asarray(arcs["centre_err_pix"], dtype=float), 0.01)
+        design = np.vstack([np.ones_like(xn), xn]).T
+        keep = np.ones(d.size, dtype=bool)
+        for _ in range(3):
+            coef, *_ = np.linalg.lstsq(design[keep] * w[keep, None], d[keep] * w[keep], rcond=None)
+            resid = d - design @ coef
+            keep = np.abs(resid) < 3 * max(np.std(resid[keep]), 0.02)
+        order_names = np.asarray(arcs["order"]).astype(str)
+        for o in orders:
+            sel = keep & (order_names == o['trace'].trace_id)
+            if sel.sum() >= min_lines_order:
+                co, *_ = np.linalg.lstsq(np.vstack([np.ones(sel.sum()), xn[sel] - 0.5]).T * w[sel, None], resid[sel] * w[sel], rcond=None)
+            else:
+                co = [np.median(resid[sel]) if sel.sum() >= 3 else 0.0, 0.0]
+            corrections[o['trace'].trace_id] = (coef[0] + co[0] - 0.5 * co[1], coef[1] + co[1])  # dpix = a + b x/nx
+        print(f"simple_wavesol: {keep.sum()}/{len(arcs)} lines, channel {coef[0]:+.3f} {coef[1]:+.3f} x/nx px, rms {np.std(resid[keep]):.3f} px")
+    else:
+        print(f"simple_wavesol: only {len(arcs)} arc lines, returning the uncorrected trace-list wavelengths")
+
+    # corrected wavelengths along the pyreduce trace centres
+    traces = [t for t in traces if not t.invalid]  # pyreduce extraction returns spectra for valid traces only
+    x = np.arange(nx)
+    wave_img = np.zeros((len(traces), nx))
+    for i, t in enumerate(traces):
+        xmm, ymm = wcs.all_pix2world(x, t.y_at_x(x), 0)
+        cols = slice(*t.column_range)
+        st = min(spectral_traces, key=lambda s: np.median(np.abs(s.xy2xi(xmm[cols], ymm[cols]))))
+        wave_img[i] = st.xy2lam(xmm, ymm) * 1e4
+        a, b = corrections.get(st.trace_id, (0.0, 0.0))
+        wave_img[i] -= (a + b * x / nx) * np.abs(np.gradient(wave_img[i]))
+    return wave_img, arcs
+
+def slit_line_profile(x, amplitude, centre, width, sigma, background):
+    """Slit image of an unresolved lamp line: a top-hat of `width` pixels convolved with a Gaussian of `sigma`."""
+    upper = (x - centre + width / 2) / (np.sqrt(2) * sigma)
+    lower = (x - centre - width / 2) / (np.sqrt(2) * sigma)
+    return 0.5 * amplitude * (erf(upper) - erf(lower)) + background
+
+
 class ScienceWrapper(Step):
     name = 'science'
 
@@ -411,10 +580,10 @@ class ScienceWrapper(Step):
             *,
             instrument: Instrument,
             channel: str,
-            bias: Optional[np.ndarray] = None,
-            bhead: Optional[dict] = None,
-            norm: Optional[np.ndarray] = None,
-            mask: Optional[np.ndarray] = None,
+            bias: np.ndarray | None = None,
+            bhead: dict | None = None,
+            norm: np.ndarray | None = None,
+            mask: np.ndarray | None = None,
             step_cfg: dict,
             **kwargs) -> dict[str, Spectra]:
         """
@@ -433,23 +602,30 @@ class ScienceWrapper(Step):
         :return: dict of Spectra objects containing the extracted spectra and associated metadata, keyed by object name.
         """
         mapping = {'smooth_slitfunction': 'lambda_sf', 'smooth_spectrum': 'lambda_sp', 'oversampling': 'osample',
-                   'extraction_reject': 'reject_threshold', 'extraction_method':'extraction_type'}
-        params = {mapping.get(k,k): v for k,v in step_cfg.items()}
+                   'extraction_reject': 'reject_threshold', 'extraction_method': 'extraction_type'}
+        params = {mapping.get(k, k): v for k, v in step_cfg.items()}
         bias_scaling = params.pop('bias_scaling')
         norm_scaling = params.pop('norm_scaling')
         params['scatter'] = kwargs.get('scatter', None)
 
-        groups = dict()
+        groups = {}
         for img in images:
             objname = fits.getheader(img, ext=0)['OBJECT']
             groups[objname] = groups.get(objname, []) + [img]
 
-        group_spectra = dict()
+        group_spectra = {}
         for objname, imgs in groups.items():
             logger.info(f"Processing {objname} for science extraction with {len(imgs)} images.")
-            im, head = combine_calibrate(imgs, instrument=instrument, channel=channel, bias=bias, bhead=bhead,
-                                         norm=norm, mask=mask, extraction_height=params['extraction_height'],
-                                         bias_scaling=bias_scaling, norm_scaling=norm_scaling)
+
+            if fits.getheader(imgs[0], ext=0).get("SUBTRACTED", False):
+                logger.info("This is a subtracted image from AB pair, combining without bias.")
+                im, head = combine_calibrate(imgs, instrument=instrument, channel=channel, bias=None, bhead=bhead,
+                                             norm=norm, mask=mask, extraction_height=params['extraction_height'],
+                                             bias_scaling=bias_scaling, norm_scaling=norm_scaling)
+            else:
+                im, head = combine_calibrate(imgs, instrument=instrument, channel=channel, bias=bias, bhead=bhead,
+                                             norm=norm, mask=mask, extraction_height=params['extraction_height'],
+                                             bias_scaling=bias_scaling, norm_scaling=norm_scaling)
 
             params.update({'gain': head["e_gain"], 'readnoise': head["e_readn"], 'dark': head["e_drk"]})
             if kwargs.get('print_params', True):
@@ -467,6 +643,7 @@ class ScienceWrapper(Step):
             group_spectra[objname] = Spectra(header=head, data=spectrum, params=meta)
 
         return group_spectra
+
 
 class BlazeNormalization(Step):
     name = 'blaze'
@@ -489,10 +666,16 @@ class BlazeNormalization(Step):
         for objname, spectra in group_spectra.items():
             data = []
             for i, sp in enumerate(spectra.data):
-                sel = (wave[i] > free_spectral_range[i][0] - 1.0) & (wave[i] < free_spectral_range[i][1] + 1.0)
-                spec = (sp.spec / blaze[i])[sel]
-                sig = (sp.sig / blaze[i])[sel]
-                newsp = Spectrum(m=sp.m, spec=spec, sig=sig, wave=wave[i][sel], cont=blaze[i][sel])
+                assert len(sp.spec) == 2048, f"Expected spectrum length of 2048, got {len(sp.spec)}"
+                valid = np.isfinite(sp.spec)
+                validspec = sp.spec[valid]
+                validsig = sp.sig[valid]
+                validblaze = blaze[i][valid]
+                validwave = wave[i][np.arange(2048)[valid]]
+                sel = (validwave > free_spectral_range[i][0]) & (validwave < free_spectral_range[i][1])
+                spec = (validspec / validblaze)[sel]
+                sig = (validsig / validblaze)[sel]
+                newsp = Spectrum(m=sp.m, spec=spec, sig=sig, wave=validwave[sel], cont=validblaze[sel])
                 data.append(newsp)
             new_spectra = Spectra(header=spectra.header, data=data, params=spectra.params)
             group_spectra[objname] = splice(new_spectra, simple=kwargs.get('simple', True))
@@ -537,74 +720,76 @@ class SensitivityFunction(Step):
         return sens_funcs
 
 
-def splice(spectra: Spectra, simple=True, **kwargs):
+def splice(spectra: Spectra, simple=True, edge_frac=0.1, nsigma=3.0, **kwargs):
     """
-    Splice the orders of the provided spectra into a single 1D spectrum.
-    :param spectra: Spectra object containing the extracted spectra and associated metadata.
-    :param simple: If True, simply concatenate the orders without any weighting or overlap handling.
-    :return: A new Spectra object containing the spliced 1D spectrum and associated metadata.
+    Splice wavelength-adjacent pieces (the orders of one channel, or whole channels) into a single 1D spectrum.
+    Each pair of neighbours is cut at one junction wavelength, so no wavelength appears twice. Inside an overlap the
+    junction maximizes the kept inverse variance per unit wavelength, 1/(sig^2 dlambda), which for channels puts it
+    where the two S/N curves cross through the dichroic. Across a gap the junction is the gap midpoint.
+    :param spectra: Spectra whose data are the pieces to splice, all in the same flux units.
+    :param simple: If True, only cut at the junctions. If False, also rescale the pieces so that neighbours agree at
+        each overlapping junction, anchored to the piece with the highest median S/N.
+    :param edge_frac: Half-width of the window around a junction used to measure each piece's flux level, as a
+        fraction of that piece's wavelength span.
+    :param nsigma: A junction ratio is applied only if the two flux levels differ by more than nsigma times their
+        combined uncertainty, so pieces that already agree are not random-walked by noisy factors.
+        No ratio is measured across a gap; there the flux calibration alone sets the relative level.
+    :return: Spectra with one spliced Spectrum.
     """
-    wave, spec, sig, cont = np.array([]), np.array([]), np.array([]), np.array([])
-    waveorder = np.argsort([np.median(sp.wave) for sp in spectra.data])
-    for i, ind in enumerate(waveorder):
-        sp = spectra.data[ind]
-        if simple or i == 0:
-            wave = np.concatenate((wave, sp.wave))
-            spec = np.concatenate((spec, sp.spec))
-            sig = np.concatenate((sig, sp.sig))
-            cont = np.concatenate((cont, sp.cont))
-        else:
-            # outer loop already in ascending wavelength order
-            # get the spec median in the overlap region for the chain and new order
-            overlap_curr = (sp.wave >= wave[0]) & (sp.wave <= max(wave[-1] + 10., sp.wave[int(0.05 * len(sp.wave))]))
-            overlap_prev = (wave >= min(sp.wave[0] - 10., wave[int(0.95 * len(wave))])) & (wave <= sp.wave[-1])
-            median_curr = np.nanmedian(sp.spec[overlap_curr])
-            # std_curr = np.nanstd(sp.spec[overlap_curr]) if np.any(overlap_curr) else 1.0
-            # weight_curr = 1.0/(std_curr ** 2) if not np.isnan(std_curr) else 1.0
-            median_prev = np.nanmedian(spec[overlap_prev])
-            # std_prev = np.nanstd(spec[overlap_prev]) if np.any(overlap_prev) else 1.0
-            # weight_prev = 1.0/(std_prev ** 2) if not np.isnan(std_prev) else 1.0
-            # new_median = (median_curr * weight_curr + median_prev * weight_prev) / (weight_curr + weight_prev)
-            # scale both prev and curr to the new median everywhere
-            # prev_fac = new_median / median_prev
-            curr_fac = median_prev / median_curr
-            spec = np.concatenate((spec, sp.spec * curr_fac))
-            sig = np.concatenate((sig, sp.sig * curr_fac))
-            cont = np.concatenate((cont, sp.cont * curr_fac))
-            wave = np.concatenate((wave, sp.wave))
+    pieces = sorted(spectra.data, key=lambda sp: np.median(sp.wave))
+    good = [np.isfinite(sp.spec) & np.isfinite(sp.sig) for sp in pieces]  # PyReduce marks masked pixels as NaN
+    wave = [sp.wave[g] for sp, g in zip(pieces, good)]
+    spec = [sp.spec[g] for sp, g in zip(pieces, good)]
+    sig = [sp.sig[g] for sp, g in zip(pieces, good)]
+    cont = [sp.cont[g] for sp, g in zip(pieces, good)]
 
-    sorted_wv = np.argsort(wave)
-    new_spectrum = Spectrum(m=None, spec=spec[sorted_wv], sig=sig[sorted_wv], wave=wave[sorted_wv],
-                            cont=cont[sorted_wv])
+    junctions, ratios = [], []
+    for wa, sa, ea, wb, sb, eb in zip(wave[:-1], spec[:-1], sig[:-1], wave[1:], spec[1:], sig[1:]):
+        lo, hi = wb.min(), wa.max()
+        if hi <= lo:
+            junctions.append(0.5 * (lo + hi))
+            ratios.append(1.0)
+            continue
+        ov = (wa >= lo) & (wa <= hi)
+        ivar_b = np.interp(wa[ov], wb, 1 / (eb ** 2 * np.gradient(wb)))  # per unit wavelength
+        gain = np.cumsum(1 / ea[ov] ** 2 - ivar_b * np.gradient(wa)[ov])
+        lam = wa[ov][np.argmax(gain)]
+        junctions.append(lam)
+        if simple:
+            ratios.append(1.0)
+            continue
+        near_a = np.abs(wa - lam) < edge_frac * np.ptp(wa)
+        near_b = np.abs(wb - lam) < edge_frac * np.ptp(wb)
+        fa, err_a = flux_at(lam, wa[near_a], sa[near_a])
+        fb, err_b = flux_at(lam, wb[near_b], sb[near_b])
+        detected = fa > 0 and fb > 0 and abs(fa - fb) > nsigma * np.hypot(err_a, err_b)
+        ratios.append(fa / fb if detected else 1.0)
+
+    # chain the junction ratios outward from the best piece so errors don't accumulate from the noisy ends
+    anchor = np.argmax([np.median(s / e) for s, e in zip(spec, sig)])
+    scale = np.ones(len(pieces))
+    for i in range(anchor + 1, len(pieces)):
+        scale[i] = scale[i - 1] * ratios[i - 1]
+    for i in range(anchor - 1, -1, -1):
+        scale[i] = scale[i + 1] / ratios[i]
+    if not simple:
+        logger.info(f"Splice scale factors (anchor piece {anchor}): {np.round(scale, 3)}")
+
+    edges = [-np.inf] + junctions + [np.inf]
+    keep = [(w > edges[i]) & (w <= edges[i + 1]) for i, w in enumerate(wave)]
+    new_spectrum = Spectrum(m=None, wave=np.concatenate([w[k] for w, k in zip(wave, keep)]),
+                            spec=np.concatenate([s[k] * f for s, k, f in zip(spec, keep, scale)]),
+                            sig=np.concatenate([e[k] * f for e, k, f in zip(sig, keep, scale)]),
+                            cont=np.concatenate([c[k] * f for c, k, f in zip(cont, keep, scale)]))
     return Spectra(header=spectra.header, data=[new_spectrum], params=spectra.params)
 
 
-def fit_smooth_continuum(x, y, degree=3, n_knots=10, sigma=3.0, median_window=51, niter=5):
+def flux_at(lam, wave, spec, nbin=10):
     """
-    Fit a smooth continuum to log10(y) using a spline with iterative sigma clipping.
-    FittingWithOutlierRemoval can't wrap the astropy spline fitters, so clipping is done here.
-    :param x: 1D array of x values (e.g., wavelength).
-    :param y: 1D array of y values (e.g., flux). Non-positive and non-finite values are ignored.
-    :param degree: Degree of the spline (1-5).
-    :param n_knots: Number of interior knots; fewer knots give a smoother fit.
-    :param sigma: Number of standard deviations to use for outlier rejection.
-    :param median_window: Size of the median filter window (pixels), applied before fitting.
-    :param niter: Maximum number of fit/clip iterations.
-    :return: Fitted Spline1D model of log10(y); evaluate as 10 ** model(x).
+    Flux at lam and its 1-sigma error, from a line through the medians of nbin consecutive-pixel bins.
+    The medians reject narrow emission/absorption lines, and the error comes from their actual scatter about the line.
     """
-    valid = np.isfinite(x) & np.isfinite(y) & (y > 0)
-    order = np.argsort(x[valid])
-    x_valid = x[valid][order]
-    ys = median_filter(np.log10(y[valid][order]), size=median_window, mode='nearest')
-
-    fitter = SplineExactKnotsFitter()
-    keep = np.ones(len(x_valid), dtype=bool)
-    for _ in range(niter):
-        # knots at quantiles of the kept points, so every knot interval still has data after clipping
-        knots = np.quantile(x_valid[keep], np.linspace(0, 1, n_knots + 2)[1:-1])
-        cont_fit = fitter(Spline1D(degree=degree), x_valid[keep], ys[keep], t=knots)
-        new_keep = ~sigma_clip(ys - cont_fit(x_valid), sigma=sigma).mask
-        if np.array_equal(new_keep, keep):
-            break
-        keep = new_keep
-    return cont_fit
+    x = np.array([np.median(w) for w in np.array_split(wave, nbin)]) - lam
+    y = np.array([np.median(s) for s in np.array_split(spec, nbin)])
+    p, cov = np.polyfit(x, y, 1, cov=True)
+    return p[1], np.sqrt(cov[1, 1])
