@@ -1,5 +1,5 @@
 trace:
-  filter_y: 3
+  filter_y: 40  # whittaker penalty, chosen against the ScopeSim trace model
   border_width: [50, 400, 50, 50]
 
 wavecal_init:

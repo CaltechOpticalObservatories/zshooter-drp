@@ -1,11 +1,11 @@
 trace:
-  filter_y: 3
+  filter_y: 100  # whittaker penalty, chosen against the ScopeSim trace model
   min_cluster: 20000
 #  filter_type: boxcar
   border_width: 0
 
 curvature:
-  window_width: 30
+  window_width: 9
 
 norm_flat:
   extraction_height: 50

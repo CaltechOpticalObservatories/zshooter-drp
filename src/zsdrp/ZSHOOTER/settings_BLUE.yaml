@@ -1,4 +1,5 @@
 trace:
+  filter_y: 1000  # whittaker penalty, chosen against the ScopeSim trace model
   min_cluster: 35000
   border_width: [0, 0, 250, 50]
 

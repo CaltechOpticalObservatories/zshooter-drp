@@ -12,7 +12,7 @@ trace:
   degree: 4
   bias_scaling: exposure_time
   filter_y: 20
-  filter_type: gaussian
+  filter_type: whittaker
   min_cluster: 20000
   noise_relative: 0.001
   border_width: 0
@@ -32,38 +32,39 @@ norm_flat:
   plot: False
 
 curvature:
-  dimensionality: 2D
+  dimensionality: 1D  # pyreduce returns no fitted_coeffs (so no trace.slit) in 2D mode
   curve_degree: 1
-  degree: [3, 3]
-  curve_height: 10
-  extraction_height: 50
+  degree: 0  # the model tilt is the detector rotation, constant along each order; higher degrees overfit sparse IR orders
+  curve_height: 50  # rows sampled across the ~64 px slit image; must be several extraction_height to measure a tilt
+  extraction_height: 5
   peak_width: 1
-  peak_threshold: 10
+  peak_threshold: 50  # x 68th percentile of the order spectrum; at 10 noise peaks in sparse orders (YJ, H, K, RED) set the tilt, at >=300 real lines are lost
   plot: False
 
 wavecal_master:
   extraction_method: simple
-  extraction_height: 50
+  extraction_height: 10
   plot: False
 
 wavecal_init:
   atlas: "thar"
   medium: 'air'
-  resid_delta: 100000
-  smoothing: 1
+#  resid_delta: 2000
+#  smoothing: 1
   edge_margin: 0
-  wave_delta: 20
-  cutoff: 0.001
+  wave_delta: 5
+  cutoff: 0.01
   match_tolerance: 1.0
-  plot: False
+  plot: True
 
 wavecal:
   atlas: "thar"
+  medium: 'air'
   threshold: 200
   dimensionality: 1D
   shift_window: 0.0
-  nstep: 1
-  degree: 4
+  nstep: 0
+  degree: 3
   plot: True
 
 science:

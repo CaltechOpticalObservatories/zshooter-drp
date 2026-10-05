@@ -22,9 +22,9 @@ transpose: false
 naxis_x: NAXIS1
 naxis_y: NAXIS2
 
-gain: 1.0
-readnoise: 0.0
-dark: 0.0
+gain: GAIN
+readnoise: RON
+dark: DARK
 exposure_time: EXPTIME
 
 #ra: RA
