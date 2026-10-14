@@ -92,7 +92,7 @@ def plot_spectra_object(obj, ax=None, title=None, xlabel=None, ylabel=None):
     if ylabel:
         ax.set_ylabel(ylabel)
     for i, sp in enumerate(obj.data):
-        if sp.wave:
+        if sp.wave is not None:
             x = sp.wave
         else:
             x = range(len(sp.spec))
