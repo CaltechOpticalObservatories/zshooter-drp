@@ -49,6 +49,7 @@ docs/auto_examples/
 docs/generated/
 docs/_images/
 docs/_plots/
+/docs/source/notebooks/
 
 # --- Jupyter / MyST notebooks (if used) ---
 .ipynb_checkpoints/
@@ -73,4 +74,3 @@ node_modules/
 npm-debug.log*
 yarn-error.log
 pnpm-lock.yaml
-

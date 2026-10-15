@@ -1,5 +1,7 @@
-import os, sys
+import os
+import sys
 from datetime import datetime
+
 sys.path.insert(0, os.path.abspath("../../src"))
 
 project = "ZShooter DRP"
@@ -16,10 +18,17 @@ extensions = [
     "sphinx_autodoc_typehints",
     "sphinx_copybutton",
     "sphinx_design",
+    "nbsphinx",
 ]
 autosummary_generate = True
 autodoc_typehints = "description"
 intersphinx_mapping = {"python": ("https://docs.python.org/3", None)}
+nbsphinx_execute = "never"
+
+# The canonical extraction notebook retains legacy Python 2 lexer metadata.
+# Keep structural and reference warnings fatal while allowing nbsphinx to
+# render those saved code cells with its fallback lexer.
+suppress_warnings = ["misc.highlighting_failure"]
 
 
 templates_path = ["_templates"]
@@ -29,8 +38,3 @@ html_theme = "furo"
 # MyST Markdown
 myst_enable_extensions = ["colon_fence", "deflist", "linkify"]
 source_suffix = {".rst": "restructuredtext", ".md": "markdown"}
-
-# Clean API index if empty (avoids warnings in fresh clones)
-if not os.path.exists("api"):
-    os.makedirs("api", exist_ok=True)
-

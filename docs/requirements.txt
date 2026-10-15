@@ -6,3 +6,4 @@ sphinx-copybutton
 sphinx-design
 sphinxcontrib-mermaid
 linkify-it-py
+nbsphinx
