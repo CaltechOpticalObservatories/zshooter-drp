@@ -11,57 +11,68 @@ flat:
 trace:
   degree: 4
   bias_scaling: exposure_time
-  filter_y: 30
-  filter_type: gaussian
+  filter_y: 20
+  filter_type: whittaker
   min_cluster: 20000
   noise_relative: 0.001
-  border_width: 40
+  border_width: 0
   manual: false
   min_width: 0.5
   split_sigma: 5
+  plot: True
 
-scatter:
-  bias_scaling: exposure_time
-  extraction_height: 0.9
-  border_width: 20
+#scatter:
+#  bias_scaling: exposure_time
+#  extraction_height: 0.9
+#  border_width: 20
 
 norm_flat:
-  smooth_slitfunction: 0.9
-  smooth_spectrum: 0
-  extraction_height: 0.9
-  oversampling: 8
-  swath_width: 50
+  extraction_height: 50
   threshold: 100
-  maxiter: 3
+  plot: False
 
 curvature:
-  dimensionality: 2D
+  dimensionality: 1D  # pyreduce returns no fitted_coeffs (so no trace.slit) in 2D mode
   curve_degree: 1
-  curve_height: 0.9
-  extraction_height: 1
-  degree:
-    - 1
-    - 1
+  degree: 0  # the model tilt is the detector rotation, constant along each order; higher degrees overfit sparse IR orders
+  curve_height: 50  # rows sampled across the ~64 px slit image; must be several extraction_height to measure a tilt
+  extraction_height: 5
+  peak_width: 1
+  peak_threshold: 50  # x 68th percentile of the order spectrum; at 10 noise peaks in sparse orders (YJ, H, K, RED) set the tilt, at >=300 real lines are lost
+  plot: False
 
 wavecal_master:
   extraction_method: simple
-  bias_scaling: exposure_time
+  extraction_height: 10
+  plot: False
+
+wavecal_init:
+  atlas: "thar"
+  medium: 'air'
+#  resid_delta: 2000
+#  smoothing: 1
+  edge_margin: 0
+  wave_delta: 5
+  cutoff: 0.01
+  match_tolerance: 1.0
+  plot: True
 
 wavecal:
+  atlas: "thar"
+  medium: 'air'
   threshold: 200
-  iterations: 3
-  dimensionality: 2D
-  degree:
-    - 7
-    - 8
-  manual: false
-  shift_window: 0
+  dimensionality: 1D
+  shift_window: 0.0
+  nstep: 0
+  degree: 3
+  plot: True
 
 science:
-  bias_scaling: exposure_time
-  oversampling: 10
-  extraction_height: 1
-  swath_width: 1000
-  smooth_slitfunction: 2
-  smooth_spectrum: 0
-  maxiter: 5
+#  bias_scaling: exposure_time
+#  oversampling: 10
+  extraction_height: 10
+#  swath_width: 200
+#  smooth_slitfunction: 2
+#  smooth_spectrum: 0.1
+#  maxiter: 5
+  plot: True

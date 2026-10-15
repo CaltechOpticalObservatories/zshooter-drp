@@ -3,10 +3,12 @@ import zsdrp.ZSHOOTER as zshooter_package
 import yaml
 from pathlib import Path
 from astropy.io import fits
+from astropy.table import Table
 import matplotlib.pyplot as plt
 import numpy as np
 
 from pyreduce.configuration import load_config
+from pyreduce.spectra import Spectra
 
 def yaml_loader(path: str | Path) -> dict:
     path = Path(path).expanduser().resolve()
@@ -45,10 +47,10 @@ def load_zshooter_settings(zshooter_instrument: zshooter_package.ZSHOOTER | None
         if not chan.exists():
             raise ValueError(f'requested channel settings file does not exist: {chan}')
         chan_cfg = yaml_loader(chan)
-        print(f'Loading settings for channel: {channel}')
         cfg = deepcopy(base_cfg)
-        for k, v in chan_cfg.items():
-            cfg[k].update(v)
+        if chan_cfg is not None:
+            for k, v in chan_cfg.items():
+                cfg[k].update(v)
         cfgs[channel] = cfg
     return cfgs
 
@@ -62,6 +64,24 @@ def save_image_to_fits(image, header, filename: str):
     hdul = fits.HDUList([fits.PrimaryHDU(header=header), fits.ImageHDU(data=image, header=header)])
     hdul.writeto(filename, overwrite=True)
 
+def save_spectra_to_ascii(spectra: Spectra, filename: str):
+    """
+    Save a Spectra object to an ASCII file.
+    """
+    outdir = Path(filename).parent
+    outdir.mkdir(parents=True, exist_ok=True)
+    data = dict()
+    header = dict(spectra.header)
+    for i, sp in enumerate(spectra.data):
+        data['wavelength'] = np.concatenate((data.get('wave', np.array([])), sp.wave))
+        data['flux'] = np.concatenate((data.get('spec', np.array([])), sp.spec))
+        data['eflux'] = np.concatenate((data.get('sig', np.array([])), sp.sig))
+        data['blaze'] = np.concatenate((data.get('cont', np.array([])), sp.cont))
+        data['index'] = np.concatenate((data.get('index', np.array([])), [i] * len(sp.wave)))
+
+    table = Table(data, meta=header)
+    table.write(filename, format='ascii', overwrite=True, delimiter='\t', comment='# ')
+
 def plot_spectra_object(obj, ax=None, title=None, xlabel=None, ylabel=None):
     if ax is None:
         fig, ax = plt.subplots(1, 1, figsize=(6, 6))
@@ -71,10 +91,64 @@ def plot_spectra_object(obj, ax=None, title=None, xlabel=None, ylabel=None):
         ax.set_xlabel(xlabel)
     if ylabel:
         ax.set_ylabel(ylabel)
-    orders = [sp.m for sp in obj.data]
-    sorted_orders = np.argsort(orders)
-    for i in sorted_orders:
-        sp = obj.data[i]
-        ax.plot(sp.spec / np.nanmax(sp.spec) + 0.3 * i, label=f'order {sp.m}')
+    for i, sp in enumerate(obj.data):
+        if sp.wave is not None:
+            x = sp.wave
+        else:
+            x = range(len(sp.spec))
+        ax.plot(x, sp.spec / np.nanmax(sp.spec) + 0.3 * i, label=f'order {i}')
     ax.legend(fontsize=8, loc=(1.01, 0.0))
     return ax
+
+def make_static_mask(det_shape: tuple, mask_corners: list[tuple], savepath:str=None) -> np.ndarray:
+    """
+    Create a static mask for a detector image based on the provided corners of the mask polygon.
+    :param det_shape: tuple
+        The shape of the detector image (height, width).
+    :param mask_corners: list of tuples
+        The corners of the polygon to be masked, specified as (x, y) coordinates.
+    :param savepath: str, optional
+        The path to save the mask as a .npz file. If None, the mask will not be saved.
+    :return: np.ndarray
+        A boolean mask where True indicates unmasked pixels and False indicates masked pixels.
+    """
+    # mask points inside corners
+    from matplotlib.path import Path
+    ny, nx = det_shape
+    y, x = np.mgrid[0:ny, 0:nx]
+    points = np.column_stack((x.ravel(), y.ravel()))
+    polygon = Path(mask_corners)
+    mask = ~polygon.contains_points(points).reshape(ny, nx)
+    if savepath and '.npz' in savepath:
+        np.savez(savepath, mask=mask)
+    return mask
+
+
+##################### Misc #########################
+from contextlib import contextmanager
+from tqdm.auto import tqdm as auto_tqdm
+import pyreduce.extract as extract_module
+
+@contextmanager
+def patched_extract_tqdm(disable: bool):
+    if not disable:
+        yield
+        return
+
+    old_tqdm = getattr(extract_module, "tqdm", None)
+    old_trange = getattr(extract_module, "trange", None)
+
+    def _silent_tqdm(*args, **kwargs):
+        kwargs.setdefault("disable", True)
+        return auto_tqdm(*args, **kwargs)
+
+    extract_module.tqdm = _silent_tqdm
+    if old_trange is not None:
+        extract_module.trange = lambda *a, **k: _silent_tqdm(range(*a), **k)
+    try:
+        yield
+    finally:
+        if old_tqdm is not None:
+            extract_module.tqdm = old_tqdm
+        if old_trange is not None:
+            extract_module.trange = old_trange

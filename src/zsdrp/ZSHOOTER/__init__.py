@@ -4,6 +4,7 @@ Defines instrument class for pyreduce to handle ZShooter specific info. Can be i
 
 import logging
 import os
+import pathlib
 import yaml
 
 from pyreduce.instruments.common import Instrument
@@ -12,6 +13,14 @@ from pyreduce.instruments.models import InstrumentConfig
 logger = logging.getLogger(__name__)
 
 class ZSHOOTER(Instrument):
+    def __init__(self):
+        super().__init__()
+        # Instrument.__init__ points _inst_dir at pyreduce/instruments/ZSHOOTER,
+        # which does not exist since this package lives outside pyreduce. Point it
+        # here so the line atlases shipped next to config.yaml are picked up:
+        # pyreduce searches _inst_dir ahead of its own defaults/atlas/.
+        self._inst_dir = os.path.dirname(os.path.abspath(__file__))
+
     def load_info(self):
         """
         Load ZShooter instrument config from the yaml config in this package.
@@ -26,8 +35,23 @@ class ZSHOOTER(Instrument):
         config = InstrumentConfig(**info)
         return config, info
 
-    def get_mask_filename(self, channel, **kwargs):
-        mf = f"mask_{channel}.npy"
-        cwd = os.path.dirname(__file__)
-        return os.path.join(cwd, mf)
+    @staticmethod
+    def get_mask_filename(channel, **kwargs):
+        mf = f"mask_{channel}*"
+        cwd = pathlib.Path(os.path.dirname(__file__)).expanduser().resolve()
+        files = cwd.glob(mf, case_sensitive=False)
+        return next(files, None)
+
+    @staticmethod
+    def detector_shape(channel):
+        """
+        Return the detector shape for the given channel.
+        """
+        if channel in ['BLUE', 'GREEN', 'RED']:
+            return (4096, 2048)
+        elif channel in ['YJ', 'H', 'K']:
+            return (2048, 2048)
+        else:
+            raise ValueError(f"Unknown channel {channel}.")
+
 
