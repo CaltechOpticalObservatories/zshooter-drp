@@ -10,6 +10,7 @@ keywords, and the WKMO KOA data archive.
 :hidden:
 
 kilonova-reduction-repair
+xshooter-reduction
 getting-started
 api/index
 

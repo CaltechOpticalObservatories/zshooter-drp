@@ -192,6 +192,7 @@ def run_reduction(files: dict[Channel, dict[str, Any]],
     :param instrument: PyReduce Instrument; defaults to the existing ZSHOOTER configuration.
     :param trace_list: Configured ScopeSim spectral trace list used by the observation.
     :param lamp_lines: Lamp table with vacuum wavelengths in Angstrom and relative amplitudes.
+    :keyword require_variance: Require prepared SCI+VARIANCE inputs; missing variance fails instead of using legacy uncertainties.
     :keyword print_params: If True, print the parameters for each step during the reduction.
 
     :return: Dictionary containing the results of the reduction for each channel.
@@ -314,13 +315,17 @@ def run_flux_calibration_and_stitch(results: dict,
                     factor = 10 ** sens_func(sp.wave)
                 sp.spec *= factor / exptime
                 sp.sig *= factor / exptime
+                if sp.covariance is not None:
+                    scale = np.broadcast_to(factor / exptime, sp.spec.shape)
+                    sp.covariance = sp.covariance.multiply(scale[:, None]).multiply(scale[None, :]).tocsr()
+                    sp.sig = np.sqrt(sp.covariance.diagonal())
                 newsp.append(sp)
             new_spectra = Spectra(data=newsp, header=spectra.header)
             objects[objname] = objects.get(objname, []) + [new_spectra]
 
             if output_dir is not None:
                 suffix = "_raw" if lvl == 0 else "_blazecal" if lvl == 1 else "_fluxcal"
-                # new_spectra.save(f"{output_dir}/spectra_{objname}_{channel}{suffix}.fits", steps=steps_run)
+                new_spectra.save(f"{output_dir}/spectra_{objname}_{channel}{suffix}.fits", steps=steps_run)
                 save_spectra_to_ascii(new_spectra, f"{output_dir}/spectra_{objname}_{channel}{suffix}.txt")
 
     # stitch all objects across channels
@@ -328,9 +333,11 @@ def run_flux_calibration_and_stitch(results: dict,
     for objname, speclist in objects.items():
         specl = [sp.data[0] for sp in speclist]
         specl = Spectra(data=specl, header=speclist[0].header)
-        stitched = splice(specl, simple=False)
+        # Calibration response sets the flux scale; fitting additional overlap ratios would add another noisy estimator.
+        stitched = splice(specl, simple=all(sp.covariance is not None for sp in specl.data))
         final_spectra[objname] = stitched
         if output_dir is not None:
+            stitched.save(f"{output_dir}/spectra_{objname}_stitched.fits")
             save_spectra_to_ascii(stitched, f"{output_dir}/spectra_{objname}_stitched.txt")
 
     return final_spectra

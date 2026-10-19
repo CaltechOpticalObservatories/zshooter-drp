@@ -18,6 +18,7 @@ from astropy.modeling.fitting import (
 from astropy.modeling.models import Chebyshev1D, Spline1D
 from astropy.stats import sigma_clip
 from pyreduce.combine_frames import combine_bias, combine_calibrate
+from pyreduce.clipnflip import clipnflip
 from pyreduce.extract import extract, extract_normalize
 from pyreduce.instruments.common import Instrument
 from pyreduce.slit_curve import Curvature
@@ -31,6 +32,7 @@ from pyreduce.wavelength_calibration import (
 from scipy.interpolate import make_interp_spline
 from scipy.ndimage import median_filter
 from scipy.optimize import curve_fit
+from scipy import sparse
 from scipy.signal import find_peaks
 from scipy.special import erf
 
@@ -590,6 +592,29 @@ def slit_line_profile(x, amplitude, centre, width, sigma, background):
     return 0.5 * amplitude * (erf(upper) - erf(lower)) + background
 
 
+def load_prepared_science(filename, instrument, channel, mask=None):
+    """Read an explicitly combined sky-subtracted frame and its pixel variance."""
+    image, header = instrument.load_fits(filename, channel, mask=mask)
+    if header['BUNIT'].lower() != 'electron' or header['GAIN'] != 1:
+        raise ValueError('Prepared science must load as accumulated electrons with GAIN=1')
+    if not header['SUBTRACTED']:
+        raise ValueError('Prepared science must already include bias/background subtraction and its variance')
+    with fits.open(filename) as hdul:
+        raw_header = hdul[0].header.copy()
+        raw_header.update(hdul[1].header)
+        scale = 1.
+        if raw_header['BUNIT'].lower() == 'adu':
+            scale = raw_header['GAIN'] * (raw_header['NDIT'] if raw_header['COMBINE'] == 'average' else 1)
+        variance = clipnflip(hdul['VARIANCE'].data, header) * scale**2
+    if variance.shape != image.shape:
+        raise ValueError('Science and variance images have different shapes')
+    valid = ~np.ma.getmaskarray(image)
+    if np.any(~np.isfinite(variance[valid])) or np.any(variance[valid] <= 0):
+        raise ValueError('Unmasked science pixels require finite positive input variance')
+    header['COVCOND'] = ('calibrations fixed', 'Pixel noise propagated conditional on measured calibration products')
+    return image, variance, header
+
+
 class ScienceWrapper(Step):
     name = 'science'
 
@@ -636,7 +661,19 @@ class ScienceWrapper(Step):
         for objname, imgs in groups.items():
             logger.info(f"Processing {objname} for science extraction with {len(imgs)} images.")
 
-            if fits.getheader(imgs[0], ext=0).get("SUBTRACTED", False):
+            with fits.open(imgs[0]) as hdul:
+                supplied_variance = kwargs.get('require_variance', False) or 'VARIANCE' in hdul
+            variance = None
+            if supplied_variance:
+                if len(imgs) != 1:
+                    raise ValueError('Combine source and sky exposures with explicit coefficients before extraction; supply one SCI+VARIANCE file per object and arm')
+                im, variance, head = load_prepared_science(imgs[0], instrument, channel, mask=mask)
+                if norm is not None and norm_scaling == 'divide':
+                    im = im / norm
+                    variance = variance / norm**2
+                elif norm is not None and norm_scaling != 'none':
+                    raise ValueError(f'Unsupported flat normalization {norm_scaling}')
+            elif fits.getheader(imgs[0], ext=0).get("SUBTRACTED", False):
                 logger.info("This is a subtracted image from AB pair, combining without bias.")
                 im, head = combine_calibrate(imgs, instrument=instrument, channel=channel, bias=None, bhead=bhead,
                                              norm=norm, mask=mask, extraction_height=params['extraction_height'],
@@ -658,7 +695,7 @@ class ScienceWrapper(Step):
 
             disable_tqdm = kwargs.get('disable_tqdm', True)
             with patched_extract_tqdm(disable_tqdm):
-                spectrum = extract(im, traces, **params)
+                spectrum = extract(im, traces, variance=variance, **params)
             group_spectra[objname] = Spectra(header=head, data=spectrum, params=meta)
 
         return group_spectra
@@ -695,7 +732,13 @@ class BlazeNormalization(Step):
                 sel = (validwave > lower) & (validwave < upper)
                 spec = (validspec / validblaze)[sel]
                 sig = (validsig / validblaze)[sel]
-                newsp = Spectrum(m=sp.m, spec=spec, sig=sig, wave=validwave[sel], cont=validblaze[sel])
+                covariance = None
+                if sp.covariance is not None:
+                    index = np.flatnonzero(valid)[sel]
+                    scale = 1 / blaze[i, index]
+                    covariance = sp.covariance[index][:, index].multiply(scale[:, None]).multiply(scale[None, :]).tocsr()
+                    sig = np.sqrt(covariance.diagonal())
+                newsp = Spectrum(m=sp.m, spec=spec, sig=sig, wave=validwave[sel], cont=validblaze[sel], covariance=covariance)
                 data.append(newsp)
             new_spectra = Spectra(header=spectra.header, data=data, params=spectra.params)
             group_spectra[objname] = splice(new_spectra, simple=kwargs.get('simple', True))
@@ -757,6 +800,11 @@ def splice(spectra: Spectra, simple=True, edge_frac=0.1, nsigma=3.0, **kwargs):
     :return: Spectra with one spliced Spectrum.
     """
     pieces = sorted(spectra.data, key=lambda sp: np.median(sp.wave))
+    has_covariance = [sp.covariance is not None for sp in pieces]
+    if any(has_covariance) and not all(has_covariance):
+        raise ValueError('Cannot splice spectra with missing covariance alongside covariance-aware spectra')
+    if any(has_covariance) and not simple:
+        raise ValueError('Covariance-aware stitching uses the standard response without fitting extra overlap scale factors; use simple=True')
     good = [np.isfinite(sp.spec) & np.isfinite(sp.sig) for sp in pieces]  # PyReduce marks masked pixels as NaN
     wave = [sp.wave[g] for sp, g in zip(pieces, good)]
     spec = [sp.spec[g] for sp, g in zip(pieces, good)]
@@ -797,10 +845,17 @@ def splice(spectra: Spectra, simple=True, edge_frac=0.1, nsigma=3.0, **kwargs):
 
     edges = [-np.inf] + junctions + [np.inf]
     keep = [(w > edges[i]) & (w <= edges[i + 1]) for i, w in enumerate(wave)]
+    covariance = None
+    if all(has_covariance):
+        blocks = []
+        for sp, valid, selected, factor in zip(pieces, good, keep, scale):
+            index = np.flatnonzero(valid)[selected]
+            blocks.append(sp.covariance[index][:, index] * factor**2)
+        covariance = sparse.block_diag(blocks, format='csr')
     new_spectrum = Spectrum(m=None, wave=np.concatenate([w[k] for w, k in zip(wave, keep)]),
                             spec=np.concatenate([s[k] * f for s, k, f in zip(spec, keep, scale)]),
                             sig=np.concatenate([e[k] * f for e, k, f in zip(sig, keep, scale)]),
-                            cont=np.concatenate([c[k] * f for c, k, f in zip(cont, keep, scale)]))
+                            cont=np.concatenate([c[k] * f for c, k, f in zip(cont, keep, scale)]), covariance=covariance)
     return Spectra(header=spectra.header, data=[new_spectrum], params=spectra.params)
 
 

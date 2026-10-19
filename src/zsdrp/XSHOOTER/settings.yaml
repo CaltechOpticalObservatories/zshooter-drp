@@ -31,6 +31,7 @@ curvature:
   peak_threshold: 10
   plot: false
 science:
+  maxiter: 100  # Allow faint slit profiles to reach the unchanged convergence criterion.
   bias_scaling: number_of_files
   extraction_height: 10
   smooth_slitfunction: 0.1
