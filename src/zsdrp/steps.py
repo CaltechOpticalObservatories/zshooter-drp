@@ -613,6 +613,7 @@ def load_prepared_science(filename, instrument, channel, mask=None):
     valid = ~np.ma.getmaskarray(image)
     if np.any(~np.isfinite(variance[valid])) or np.any(variance[valid] <= 0):
         raise ValueError('Unmasked science pixels require finite positive input variance')
+    header['COVUNIT'] = 'electron2'
     header['COVCOND'] = ('calibrations fixed', 'Pixel noise propagated conditional on measured calibration products')
     return image, variance, header
 

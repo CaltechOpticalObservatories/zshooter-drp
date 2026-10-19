@@ -26,6 +26,13 @@ def test_prepared_variance_follows_pixel_rotation_and_count_scale(channel, orien
     np.testing.assert_array_equal(var, np.rot90(variance, -orientation) * factor**2)
     assert image.min() < 0  # Negative sky-subtracted signal must not become a Poisson variance estimate.
     assert head['COVCOND'] == 'calibrations fixed'
+    assert u.Unit(head['COVUNIT']) == u.electron**2
+    extracted = Spectrum(m=1, spec=image.ravel(), sig=np.sqrt(var.ravel()), covariance=sparse.diags(var.ravel(), format='csr'))
+    extracted_path = tmp_path / 'extracted_electrons.fits'
+    Spectra(header=head, data=[extracted]).save(extracted_path)
+    with fits.open(extracted_path) as saved:
+        assert u.Unit(saved[0].header['COVUNIT']) == u.electron**2
+        assert u.Unit(saved['COV0000'].columns['DATA'].unit) == u.electron**2
 
 
 def test_blaze_division_propagates_off_diagonal_covariance():
