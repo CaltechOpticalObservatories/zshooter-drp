@@ -6,7 +6,7 @@ import enum
 
 from zsdrp.ZSHOOTER import ZSHOOTER
 from zsdrp.steps import *
-from zsdrp.utils import load_zshooter_settings, save_spectra_to_ascii
+from zsdrp.utils import load_instrument_settings, save_spectra_to_ascii
 from pyreduce.combine_frames import combine_bias, combine_calibrate
 
 logger = logging.getLogger(__name__)
@@ -28,15 +28,6 @@ class Channel(enum.StrEnum):
     YJ = "YJ"
     H = "H"
     K = "K"
-
-def _validate_channel(chankey: str | Channel) -> Channel:
-    if isinstance(chankey, Channel):
-        return chankey
-    try:
-        valkey = Channel(chankey)
-        return valkey
-    except ValueError as e:
-        raise ValueError(f"Invalid channel: {chankey}. Valid options are: {[chan.value for chan in Channel]}") from e
 
 def _validate_step(stepkey: str | ReductionStep) -> ReductionStep:
     if isinstance(stepkey, ReductionStep):
@@ -108,7 +99,7 @@ def _reduce_cals(instrument: ZSHOOTER, channel: str, channel_cfg: dict, arc_file
     else:
         arc = combine_calibrate(files=list(arc_files), instrument=instrument, channel=channel, bias=bias,
                                 bhead=bhead, norm=norm, traces=traces)
-        wave_img, arc_lines = simple_wavesol(arc[0], arc[1], traces)
+        wave_img, arc_lines = simple_wavesol(arc[0], arc[1], traces, trace_list=kwargs.get('trace_list'), lamp_lines=kwargs.get('lamp_lines'))
         if output_dir is not None:
             orders = [t.m for t in traces if not t.invalid]
             np.savez(f"{output_dir}/wavecal_{channel}.npz", wave_img=wave_img, orders=orders, arc_lines=arc_lines.as_array())
@@ -185,32 +176,39 @@ def run_reduction(files: dict[Channel, dict[str, Any]],
                   disable_steps: Optional[list[ReductionStep]] = None,
                   disable_all_plots: bool = False,
                   reuse_cals: bool = True,
+                  instrument=None,
+                  trace_list=None,
+                  lamp_lines=None,
                   **kwargs):
     """
-    Run the full reduction pipeline for ZSHOOTER data.
+    Run the reduction pipeline with a configured instrument and optional ScopeSim trace list.
     :param files: Nested dict of files for each channel.
                   The optional 'trace' group supplies order-definition frames separately from the full-slit flat.
-    :param channels: List of channels to reduce. If None, all channels will be reduced. Options are BLUE, GREEN, RED, YJ, H, K.
+    :param channels: Instrument channel names to reduce; None selects all configured channels.
     :param output_dir: Directory to save the output files. If None, files will not be saved.
     :param disable_steps: List of steps to disable during the reduction. If None, all steps will be run. Options include: mask, scatter, trace, curvature, norm_flat, wavecal, science, continuum.
     :param disable_all_plots: If True, all diagnostic plotting will be disabled during the reduction.
     :param reuse_cals: If True, reuse existing reduced calibration files if they exist.
+    :param instrument: PyReduce Instrument; defaults to the existing ZSHOOTER configuration.
+    :param trace_list: Configured ScopeSim spectral trace list used by the observation.
+    :param lamp_lines: Lamp table with vacuum wavelengths in Angstrom and relative amplitudes.
     :keyword print_params: If True, print the parameters for each step during the reduction.
 
     :return: Dictionary containing the results of the reduction for each channel.
     """
     # load instrument
-    zs = ZSHOOTER()
+    zs = ZSHOOTER() if instrument is None else instrument
 
     # load step settings
-    settings_cfg = load_zshooter_settings(zshooter_instrument=zs)
+    settings_cfg = load_instrument_settings(zs)
 
     # validate input files
-    files = {_validate_channel(chankey): filedict for chankey, filedict in files.items()}
-
-    # validate channels
-    channels = [chan for chan in Channel] if channels is None else channels if isinstance(channels, list) else [channels]
-    channels = [_validate_channel(chan) for chan in channels]
+    files = {str(chankey): filedict for chankey, filedict in files.items()}
+    channels = zs.config.channels if channels is None else channels if isinstance(channels, list) else [channels]
+    channels = [str(chan) for chan in channels]
+    for channel in channels:
+        if channel not in zs.config.channels:
+            raise ValueError(f'{channel} is not a channel of {zs.name}')
 
     # validate output_dir
     if output_dir is not None and Path(output_dir).resolve().is_dir():
@@ -224,9 +222,15 @@ def run_reduction(files: dict[Channel, dict[str, Any]],
 
     # load free spectral ranges for ZSHOOTER
     fsrs = dict()
-    with np.load(os.path.join(zs._inst_dir, 'free_spectral_ranges.npz')) as f:
-        for chan in channels:
-            fsrs[chan] = dict(zip(f[f'{chan.value}_orders'], f[chan.value], strict=True))
+    if isinstance(zs, ZSHOOTER):
+        with np.load(os.path.join(zs._inst_dir, 'free_spectral_ranges.npz')) as f:
+            for chan in channels:
+                fsrs[chan] = dict(zip(f[f'{chan}_orders'], f[chan], strict=True))
+    else:
+        for channel in channels:
+            arm_id = zs.config.channels.index(channel)
+            fsrs[channel] = {int(st.trace_id.rsplit('_', 1)[1]): (st.wave_min * 1e4, st.wave_max * 1e4)
+                             for st in trace_list.spectral_traces.values() if st.meta['image_plane_id'] == arm_id}
 
     # run reduction for each channel
     results = dict() # for per channel intermediate results and calibration products
@@ -236,20 +240,20 @@ def run_reduction(files: dict[Channel, dict[str, Any]],
             logger.warning(f"No files found for channel {channel}, skipping reduction for this channel.")
             continue
         chanfiles = files[channel]
-        chancfg = settings_cfg[channel.value]
+        chancfg = settings_cfg[channel]
 
         if disable_all_plots:
             for key in chancfg.keys():
                 if 'plot' in chancfg[key]:
                     chancfg[key]['plot'] = False
 
-        chanres = _run_per_channel_reduction(zs, channel.value, chancfg, science_files=chanfiles.get('science', []),
+        chanres = _run_per_channel_reduction(zs, channel, chancfg, science_files=chanfiles.get('science', []),
                                             bias_files=chanfiles.get('bias', []),
                                             arc_files=chanfiles.get('wavecal_master', []),
                                             flat_files=chanfiles.get('flat', []),
                                             trace_files=chanfiles.get('trace'),
                                             free_spectral_range=fsrs[channel], disable_steps=disable_steps,
-                                            output_dir=output_dir, reuse_cals=reuse_cals, **kwargs)
+                                            output_dir=output_dir, reuse_cals=reuse_cals, trace_list=trace_list, lamp_lines=lamp_lines, **kwargs)
         chanres['steps_run'] = [step.value for step in ReductionStep if step not in disable_steps]
         results[channel] = chanres
     return results

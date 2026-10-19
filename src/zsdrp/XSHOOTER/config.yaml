@@ -1,0 +1,38 @@
+__instrument__: XSHOOTER
+instrument: INSTRUME
+id_instrument: XSHOOTER
+telescope: VLT
+date: DATE-OBS
+date_format: isot
+channels: [UVB, VIS, NIR]
+kw_channel: ARM
+id_channel: [UVB, VIS, NIR]
+extension: 1
+# UVB wavelength increases toward decreasing raw y; VIS toward increasing y.
+orientation: [1, 3, 0]
+transpose: false
+prescan_x: 0
+overscan_x: 0
+prescan_y: 0
+overscan_y: 0
+naxis_x: NAXIS1
+naxis_y: NAXIS2
+gain: GAIN
+readnoise: RON
+dark: DARK
+exposure_time: EXPTIME
+object: OBJECT
+kw_bias: IMAGETYPE
+kw_flat: IMAGETYPE
+kw_curvature: IMAGETYPE
+kw_orders: IMAGETYPE
+kw_wave: IMAGETYPE
+kw_comb: null
+kw_spec: IMAGETYPE
+id_bias: BIAS
+id_flat: DOMEFLAT
+id_orders: TRACE
+id_curvature: ARCS
+id_wave: ARCS
+id_comb: null
+id_spec: SCIENCE
