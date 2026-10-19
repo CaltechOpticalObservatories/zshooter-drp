@@ -9,6 +9,7 @@ keywords, and the WKMO KOA data archive.
 :maxdepth: 2
 :hidden:
 
+kilonova-reduction-repair
 getting-started
 api/index
 
