@@ -32,7 +32,7 @@ norm_flat:
   plot: False
 
 curvature:
-  dimensionality: 1D  # pyreduce returns no fitted_coeffs (so no trace.slit) in 2D mode
+  dimensionality: 1D  # The analytical model has a constant detector-rotation tilt per order.
   curve_degree: 1
   degree: 0  # the model tilt is the detector rotation, constant along each order; higher degrees overfit sparse IR orders
   curve_height: 50  # rows sampled across the ~64 px slit image; must be several extraction_height to measure a tilt
