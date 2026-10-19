@@ -245,6 +245,7 @@ class CurvatureWrapper(Step):
                 t.slit = fitted_coeffs[i]
             if slitdeltas is not None and i < slitdeltas.shape[0]:
                 t.slitdelta = slitdeltas[i]
+                t.slitdelta_y = curvature['slitdelta_y'][i]
         return traces
 
 
@@ -452,7 +453,8 @@ def simple_wavesol(image: np.ndarray,
     """
     from scopesim.effects import EchelleSpectralTraceList
 
-    inst_dir = Path(header['SIM CONFIG SIM file local_packages_path']) / header['INSTRUME']
+    if trace_list is None or lamp_lines is None:
+        inst_dir = Path(header['SIM CONFIG SIM file local_packages_path']) / header['INSTRUME']
     if trace_list is None:
         with open(inst_dir / 'ZShooter_SPEC.yaml') as f:
             effect = next(e for e in yaml.safe_load(f)['effects'] if e['name'] == 'trace_list_analytical')

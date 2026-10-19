@@ -68,7 +68,7 @@ wavecal:
   plot: True
 
 science:
-  maxiter: 100  # Allow faint slit profiles to reach the unchanged convergence criterion.
+  maxiter: 1000  # A cap: converged slit profiles stop early at the unchanged tolerance.
 #  bias_scaling: exposure_time
 #  oversampling: 10
   extraction_height: 10
