@@ -7,7 +7,7 @@ from astropy import units as u
 
 from zsdrp.ZSHOOTER import ZSHOOTER
 from zsdrp.steps import *
-from zsdrp.utils import load_instrument_settings, save_spectra_to_ascii
+from zsdrp.utils import load_instrument_settings, save_spectra_to_ascii, yaml_loader
 from pyreduce.combine_frames import combine_bias, combine_calibrate
 
 logger = logging.getLogger(__name__)
@@ -54,6 +54,9 @@ def _reduce_cals(instrument: ZSHOOTER, channel: str, channel_cfg: dict, arc_file
     if flat is None:
         logger.warning(f"No master flat available for channel {channel}, cannot perform trace step.")
         return res
+    if isinstance(instrument, ZSHOOTER) and fhead['DETMODE'] != 'SPEC':
+        detector_settings = yaml_loader(Path(instrument._inst_dir) / f"settings_{fhead['DETMODE']}.yaml")
+        channel_cfg['trace'].update(detector_settings[channel])
     trace_image = flat
     if trace_files is not None and list(trace_files) != list(flat_files):
         trace_image, _ = FlatWrapper.run(trace_files, instrument=instrument, channel=channel, bias=bias, bhead=bhead,
