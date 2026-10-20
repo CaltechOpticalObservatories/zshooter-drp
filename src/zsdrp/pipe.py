@@ -107,7 +107,8 @@ def _reduce_cals(instrument: ZSHOOTER, channel: str, channel_cfg: dict, arc_file
     res.update({'wave_img': wave_img, 'arc_lines': arc_lines})
     if output_dir is not None:
         # Wavelength calibration assigns the measured traces their physical order numbers.
-        TraceWrapper.save(traces, f"{output_dir}/trace_{channel}.fits")
+        fhead["CALNX"], fhead["CALNY"] = fhead["NAXIS1"], fhead["NAXIS2"]
+        TraceWrapper.save(traces, f"{output_dir}/trace_{channel}.fits", header=fhead)
 
     return res
 
@@ -129,6 +130,18 @@ def _run_per_channel_reduction(instrument: ZSHOOTER, channel: str, channel_cfg: 
     chanres['master_bias'] = (bias, bhead)
 
     if reuse_cals and output_dir is not None:
+        trace_path = Path(output_dir) / f'trace_{channel}.fits'
+        if isinstance(instrument, ZSHOOTER) and trace_path.exists():
+            saved = fits.getheader(trace_path)
+            current = fits.getheader(science_files[0], 1)
+            if saved['DETMODE'] != current['DETMODE']:
+                raise ValueError('Saved calibration uses a different detector package; choose its matching directory or rebuild calibrations.')
+            if (saved['CALNX'], saved['CALNY']) != (current['NAXIS1'], current['NAXIS2']):
+                raise ValueError('Saved calibration has a different detector shape; rebuild calibrations.')
+            from astropy.wcs import WCS
+            old_wcs, new_wcs = WCS(saved, key='D').wcs, WCS(current, key='D').wcs
+            if not (np.array_equal(old_wcs.cdelt, new_wcs.cdelt) and np.array_equal(old_wcs.crpix, new_wcs.crpix) and np.array_equal(old_wcs.crval, new_wcs.crval) and np.array_equal(old_wcs.pc, new_wcs.pc)):
+                raise ValueError('Saved calibration has a different detector WCS; rebuild calibrations.')
         try:
             traces = TraceWrapper.load(f"{output_dir}/trace_{channel}.fits")
             norm, blaze, slitfunc, slitfunc_meta = NormflatWrapper.load(f"{output_dir}/norm_{channel}.npz")
