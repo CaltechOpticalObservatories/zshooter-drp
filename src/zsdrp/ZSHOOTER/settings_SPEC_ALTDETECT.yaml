@@ -21,6 +21,6 @@ GREEN: &short_trace
   border_width: 0
   closing_shape: [1, 2]
 RED: *short_trace
-YJ: {}  # The LmAPD detector and its existing short-slit tracing are unchanged.
+YJ: *short_trace
 H: *short_trace
 K: *short_trace
