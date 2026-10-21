@@ -22,11 +22,13 @@ def detector_header():
 
 
 @pytest.mark.parametrize('change,expected', [('mode', 'detector package'), ('shape', 'detector shape'), ('pitch', 'detector WCS'), ('position', 'detector WCS'), ('missing', 'DETMODE'), ('same', None)])
-def test_saved_calibration_must_match_detector(monkeypatch, tmp_path, change, expected):
+@pytest.mark.parametrize('suffix', ['.fits', '.fits.gz'])
+def test_saved_calibration_must_match_detector(monkeypatch, tmp_path, change, expected, suffix):
     header = detector_header()
     traces = [Trace(m=42, pos=np.array([0., 2.]), column_range=(0, 8), height=3)]
-    TraceWrapper.save(traces, tmp_path/'trace_H.fits', header=header)
-    saved = fits.getheader(tmp_path/'trace_H.fits')
+    trace_path = tmp_path/f'trace_H{suffix}'
+    TraceWrapper.save(traces, trace_path, header=header)
+    saved = fits.getheader(trace_path)
     assert saved['DETMODE'] == 'SPEC_ALTDETECT'
     assert saved['CDELT1D'] == .018
     assert (saved['CALNX'], saved['CALNY']) == (8, 6)
