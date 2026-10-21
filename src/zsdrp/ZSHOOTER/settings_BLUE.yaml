@@ -7,4 +7,4 @@ norm_flat:
   threshold: 50
 
 science:
-  maxiter: 2000  # The faint 7.5-day BLUE profile converges at iteration 1190 with the unchanged tolerance.
+  maxiter: 4000  # The detector-package 20-day BLUE profile needs 3304 native iterations at the unchanged tolerance.
