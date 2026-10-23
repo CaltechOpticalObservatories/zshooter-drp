@@ -559,9 +559,13 @@ def simple_wavesol(image: np.ndarray,
         xmm, ymm = wcs.all_pix2world(x, t.y_at_x(x), 0)
         cols = slice(*t.column_range)
         st = min(spectral_traces, key=lambda s: np.median(np.abs(s.xy2xi(xmm[cols], ymm[cols]))))
+        t.m = int(st.trace_id.rsplit('_', 1)[1])
         wave_img[i] = st.xy2lam(xmm, ymm) * 1e4
         a, b = corrections.get(st.trace_id, (0.0, 0.0))
         wave_img[i] -= (a + b * x / nx) * np.abs(np.gradient(wave_img[i]))
+    order_numbers = [t.m for t in traces]
+    if len(set(order_numbers)) != len(order_numbers):
+        raise ValueError(f"Multiple measured traces assigned to the same physical order: {order_numbers}")
     return wave_img, arcs
 
 def slit_line_profile(x, amplitude, centre, width, sigma, background):
@@ -652,27 +656,28 @@ class BlazeNormalization(Step):
     def run(group_spectra: dict[str, Spectra],
             wave: np.ndarray,
             blaze: np.ndarray,
-            free_spectral_range: np.ndarray,
+            free_spectral_range: dict[int, np.ndarray],
             **kwargs) -> dict[str, Spectra]:
         """
         Run the continuum normalization step on the provided spectra using traces and blaze function.
         :param group_spectra: dict of Spectra objects, keyed by object name.
         :param wave: Wavelength solution array of shape (n_trace, n_cols)
         :param blaze: Blaze function array corresponding to the spectra of shape (n_trace, n_cols).
-        :param free_spectral_range: Free spectral range array corresponding to the spectra of shape (n_trace, 2).
+        :param free_spectral_range: Physical order number -> lower/upper FSR wavelengths in Angstrom.
         :keyword print_params: If True, prints the supplied parameters used for continuum normalization.
         :return: A new Spectra object containing the continuum-normalized spectra and associated metadata.
         """
         for objname, spectra in group_spectra.items():
             data = []
             for i, sp in enumerate(spectra.data):
-                assert len(sp.spec) == 2048, f"Expected spectrum length of 2048, got {len(sp.spec)}"
-                valid = np.isfinite(sp.spec)
+                assert sp.spec.shape == wave[i].shape == blaze[i].shape
+                valid = np.isfinite(sp.spec) & np.isfinite(sp.sig) & np.isfinite(blaze[i]) & (blaze[i] > 0)
                 validspec = sp.spec[valid]
                 validsig = sp.sig[valid]
                 validblaze = blaze[i][valid]
-                validwave = wave[i][np.arange(2048)[valid]]
-                sel = (validwave > free_spectral_range[i][0]) & (validwave < free_spectral_range[i][1])
+                validwave = wave[i][valid]
+                lower, upper = free_spectral_range[sp.m]
+                sel = (validwave > lower) & (validwave < upper)
                 spec = (validspec / validblaze)[sel]
                 sig = (validsig / validblaze)[sel]
                 newsp = Spectrum(m=sp.m, spec=spec, sig=sig, wave=validwave[sel], cont=validblaze[sel])

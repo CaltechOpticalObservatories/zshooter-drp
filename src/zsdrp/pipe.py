@@ -49,7 +49,7 @@ def _validate_step(stepkey: str | ReductionStep) -> ReductionStep:
 
 def _reduce_cals(instrument: ZSHOOTER, channel: str, channel_cfg: dict, arc_files: Sequence[str],
                 flat_files: Sequence[str], bias: Optional[np.ndarray], bhead: Optional[dict],
-                disable_steps: list[ReductionStep], output_dir: Optional[str], **kwargs) -> dict:
+                disable_steps: list[ReductionStep], output_dir: Optional[str], trace_files=None, **kwargs) -> dict:
 
     flat, fhead = FlatWrapper.run(flat_files, instrument=instrument, channel=channel, bias=bias, bhead=bhead,
                                   step_cfg=channel_cfg['flat'], **kwargs)
@@ -62,8 +62,12 @@ def _reduce_cals(instrument: ZSHOOTER, channel: str, channel_cfg: dict, arc_file
     if flat is None:
         logger.warning(f"No master flat available for channel {channel}, cannot perform trace step.")
         return res
-    traces = TraceWrapper.run(flat, step_cfg=channel_cfg[ReductionStep.TRACE], **kwargs)
-    logger.info("Traced flat files successfully.")
+    trace_image = flat
+    if trace_files is not None and list(trace_files) != list(flat_files):
+        trace_image, _ = FlatWrapper.run(trace_files, instrument=instrument, channel=channel, bias=bias, bhead=bhead,
+                                         step_cfg=channel_cfg['flat'], **kwargs)
+    traces = TraceWrapper.run(trace_image, step_cfg=channel_cfg[ReductionStep.TRACE], **kwargs)
+    logger.info("Traced order-definition files successfully.")
 
     # curvature
     if ReductionStep.CURVATURE in disable_steps:
@@ -78,8 +82,6 @@ def _reduce_cals(instrument: ZSHOOTER, channel: str, channel_cfg: dict, arc_file
         logger.info("Curvature correction created successfully.")
 
     res['traces'] = traces
-    if output_dir is not None:
-        TraceWrapper.save(traces, f"{output_dir}/trace_{channel}.fits")
 
     # normflat
     norm, blaze, slitfunc, slitfunc_meta = None, None, None, None
@@ -108,16 +110,20 @@ def _reduce_cals(instrument: ZSHOOTER, channel: str, channel_cfg: dict, arc_file
                                 bhead=bhead, norm=norm, traces=traces)
         wave_img, arc_lines = simple_wavesol(arc[0], arc[1], traces)
         if output_dir is not None:
-            np.savez(f"{output_dir}/wavecal_{channel}.npz", wave_img=wave_img)
+            orders = [t.m for t in traces if not t.invalid]
+            np.savez(f"{output_dir}/wavecal_{channel}.npz", wave_img=wave_img, orders=orders, arc_lines=arc_lines.as_array())
     res.update({'wave_img': wave_img, 'arc_lines': arc_lines})
+    if output_dir is not None:
+        # Wavelength calibration assigns the measured traces their physical order numbers.
+        TraceWrapper.save(traces, f"{output_dir}/trace_{channel}.fits")
 
     return res
 
 
 def _run_per_channel_reduction(instrument: ZSHOOTER, channel: str, channel_cfg: dict, science_files: Sequence[str],
                               bias_files: Sequence[str], arc_files: Sequence[str], flat_files: Sequence[str],
-                              free_spectral_range: np.ndarray, disable_steps: list[ReductionStep],
-                              output_dir: Optional[str], reuse_cals: bool = True, **kwargs) -> dict:
+                              free_spectral_range: dict, disable_steps: list[ReductionStep],
+                              output_dir: Optional[str], reuse_cals: bool = True, trace_files=None, **kwargs) -> dict:
     chanres: dict[str, Any] = dict()
     # load mask
     mask = None
@@ -136,15 +142,18 @@ def _run_per_channel_reduction(instrument: ZSHOOTER, channel: str, channel_cfg: 
             norm, blaze, slitfunc, slitfunc_meta = NormflatWrapper.load(f"{output_dir}/norm_{channel}.npz")
             with np.load(f"{output_dir}/wavecal_{channel}.npz") as data:
                 wave_img = data['wave_img']
+                if not np.array_equal(data['orders'], [t.m for t in traces if not t.invalid]):
+                    raise ValueError("Saved wavelength rows and trace order numbers differ; rebuild calibrations.")
+                arc_lines = Table(data['arc_lines'])
             chanres.update({'traces': traces, 'norm': norm, 'blaze': blaze, 'slitfunc': slitfunc,
-                            'slitfunc_meta': slitfunc_meta, 'wave_img': wave_img})
+                            'slitfunc_meta': slitfunc_meta, 'wave_img': wave_img, 'arc_lines': arc_lines})
         except Exception as e:
             logger.warning(f"Could not load traces for channel {channel} from {output_dir}. "
                            f"Will attempt to reduce calibration files. Error: {e}")
     if 'traces' not in chanres:
         # reduce calibration files
         calres = _reduce_cals(instrument, channel, channel_cfg, arc_files, flat_files, bias, bhead,
-                             disable_steps=disable_steps, output_dir=output_dir, **kwargs)
+                             disable_steps=disable_steps, output_dir=output_dir, trace_files=trace_files, **kwargs)
         chanres.update(calres)
 
     # science extraction
@@ -164,7 +173,6 @@ def _run_per_channel_reduction(instrument: ZSHOOTER, channel: str, channel_cfg: 
                        f"cannot perform blaze normalization.")
     else:
         logger.info(f"Performing blaze normalization for channel {channel}.")
-        free_spectral_range = free_spectral_range[1:] if channel=='RED' else free_spectral_range # TODO: Hack for now
         group_spectra = BlazeNormalization.run(group_spectra, chanres['wave_img'], chanres['blaze'], free_spectral_range)
         chanres.update({'spectra': group_spectra, 'level': 1})
 
@@ -181,6 +189,7 @@ def run_reduction(files: dict[Channel, dict[str, Any]],
     """
     Run the full reduction pipeline for ZSHOOTER data.
     :param files: Nested dict of files for each channel.
+                  The optional 'trace' group supplies order-definition frames separately from the full-slit flat.
     :param channels: List of channels to reduce. If None, all channels will be reduced. Options are BLUE, GREEN, RED, YJ, H, K.
     :param output_dir: Directory to save the output files. If None, files will not be saved.
     :param disable_steps: List of steps to disable during the reduction. If None, all steps will be run. Options include: mask, scatter, trace, curvature, norm_flat, wavecal, science, continuum.
@@ -217,7 +226,7 @@ def run_reduction(files: dict[Channel, dict[str, Any]],
     fsrs = dict()
     with np.load(os.path.join(zs._inst_dir, 'free_spectral_ranges.npz')) as f:
         for chan in channels:
-            fsrs[chan] = f[chan.value]
+            fsrs[chan] = dict(zip(f[f'{chan.value}_orders'], f[chan.value], strict=True))
 
     # run reduction for each channel
     results = dict() # for per channel intermediate results and calibration products
@@ -238,6 +247,7 @@ def run_reduction(files: dict[Channel, dict[str, Any]],
                                             bias_files=chanfiles.get('bias', []),
                                             arc_files=chanfiles.get('wavecal_master', []),
                                             flat_files=chanfiles.get('flat', []),
+                                            trace_files=chanfiles.get('trace'),
                                             free_spectral_range=fsrs[channel], disable_steps=disable_steps,
                                             output_dir=output_dir, reuse_cals=reuse_cals, **kwargs)
         chanres['steps_run'] = [step.value for step in ReductionStep if step not in disable_steps]

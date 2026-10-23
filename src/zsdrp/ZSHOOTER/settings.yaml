@@ -48,7 +48,7 @@ wavecal_master:
 
 wavecal_init:
   atlas: "thar"
-  medium: 'air'
+  medium: 'vac'  # The simulated lamp tables use vacuum wavelengths.
 #  resid_delta: 2000
 #  smoothing: 1
   edge_margin: 0
@@ -59,7 +59,7 @@ wavecal_init:
 
 wavecal:
   atlas: "thar"
-  medium: 'air'
+  medium: 'vac'
   threshold: 200
   dimensionality: 1D
   shift_window: 0.0
