@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Optional, Any, Sequence
 import logging
 import enum
+from astropy import units as u
 
 from zsdrp.ZSHOOTER import ZSHOOTER
 from zsdrp.steps import *
@@ -265,7 +266,7 @@ def run_flux_calibration_and_stitch(results: dict,
     Run flux calibration and stitch spectra across channels.
     :param results: Dictionary containing the results of the reduction for each channel.
     :param reference_wave: Optional reference wavelength array for flux normalization.
-    :param reference_flux: Optional reference flux array for flux normalization.
+    :param reference_flux: Optional reference flux density in erg/s/cm2/Angstrom, evaluated at reference_wave in Angstrom.
     :param standard_star_name: Name of the standard star in files to use for flux calibration. Default is "STANDARD".
     :param plot: Whether to plot the flux calibration results. Default is True.
     :param output_dir: Directory to save the output files. If None, no files will be saved.
@@ -302,21 +303,37 @@ def run_flux_calibration_and_stitch(results: dict,
         steps_run = chanres.get("steps_run", [])
         for objname, spectra in group_spectra.items():
             newsp = []
-            exptime = float(spectra.header.get("EXPTIME", 1.0))
+            flux_calibrated = sens_func is not None and objname != standard_star_name.upper()
+            exptime = float(spectra.header["EXPTIME"])
             for sp in spectra.data:
-                if sens_func is None or objname==standard_star_name.upper():
+                if not flux_calibrated:
                     factor = 1.0
                 else:
                     factor = 10 ** sens_func(sp.wave)
                 sp.spec *= factor / exptime
                 sp.sig *= factor / exptime
+                if sp.covariance is not None:
+                    scale = np.broadcast_to(factor / exptime, sp.spec.shape)
+                    sp.covariance = sp.covariance.multiply(scale[:, None]).multiply(scale[None, :]).tocsr()
+                    sp.sig = np.sqrt(sp.covariance.diagonal())
                 newsp.append(sp)
-            new_spectra = Spectra(data=newsp, header=spectra.header)
+            header = spectra.header.copy()
+            if flux_calibrated:
+                output_unit = u.erg / (u.s * u.cm**2 * u.AA)
+            elif 'BUNIT' in header:
+                output_unit = u.Unit(header['BUNIT']) / u.s
+            else:
+                output_unit = None  # Legacy frames do not identify their input count unit.
+            if output_unit is not None:
+                header['BUNIT'] = output_unit.to_string()
+                header['COVUNIT'] = (output_unit**2).to_string()
+            spectra.header = header
+            new_spectra = Spectra(data=newsp, header=header)
             objects[objname] = objects.get(objname, []) + [new_spectra]
 
             if output_dir is not None:
-                suffix = "_raw" if lvl == 0 else "_blazecal" if lvl == 1 else "_fluxcal"
-                # new_spectra.save(f"{output_dir}/spectra_{objname}_{channel}{suffix}.fits", steps=steps_run)
+                suffix = "_fluxcal" if flux_calibrated else "_raw" if lvl == 0 else "_blazecal"
+                new_spectra.save(f"{output_dir}/spectra_{objname}_{channel}{suffix}.fits", steps=steps_run)
                 save_spectra_to_ascii(new_spectra, f"{output_dir}/spectra_{objname}_{channel}{suffix}.txt")
 
     # stitch all objects across channels
@@ -324,9 +341,11 @@ def run_flux_calibration_and_stitch(results: dict,
     for objname, speclist in objects.items():
         specl = [sp.data[0] for sp in speclist]
         specl = Spectra(data=specl, header=speclist[0].header)
-        stitched = splice(specl, simple=False)
+        # Calibration response sets the flux scale; fitting additional overlap ratios would add another noisy estimator.
+        stitched = splice(specl, simple=all(sp.covariance is not None for sp in specl.data))
         final_spectra[objname] = stitched
         if output_dir is not None:
+            stitched.save(f"{output_dir}/spectra_{objname}_stitched.fits")
             save_spectra_to_ascii(stitched, f"{output_dir}/spectra_{objname}_stitched.txt")
 
     return final_spectra
