@@ -199,9 +199,9 @@ class TraceWrapper(Step):
         return trace(image, **params)
 
     @staticmethod
-    def save(traces, filename):
+    def save(traces, filename, header=None):
         os.makedirs(os.path.dirname(filename), exist_ok=True)
-        save_traces(filename, traces, steps=[TraceWrapper.name])
+        save_traces(filename, traces, header=header, steps=[TraceWrapper.name])
 
     @staticmethod
     def load(filename):
@@ -458,7 +458,11 @@ def simple_wavesol(image: np.ndarray,
     if trace_list is None:
         with open(inst_dir / 'ZShooter_SPEC.yaml') as f:
             effect = next(e for e in yaml.safe_load(f)['effects'] if e['name'] == 'trace_list_analytical')
-        trace_list = EchelleSpectralTraceList(**{**effect['kwargs'], 'filename': str(inst_dir / effect['kwargs']['filename'])})
+        from scopesim import UserCommands
+        commands = UserCommands(use_instrument='ZShooter_v2', set_modes=[header['DETMODE']])
+        for arm in ('b', 'g', 'r', 'yj', 'h', 'k'):
+            commands[f'!DET.pixel_size_{arm}'] = header[f'SIM CONFIG DET pixel_size_{arm}']
+        trace_list = EchelleSpectralTraceList(cmds=commands, **{**effect['kwargs'], 'filename': str(inst_dir / effect['kwargs']['filename'])})
     spectral_traces = [st for st in trace_list.spectral_traces.values() if st.meta['image_plane_id'] == int(header['ID'])]
 
     # lamp line list, amplitudes normalised per file as when the arc source was built

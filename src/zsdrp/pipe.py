@@ -7,7 +7,7 @@ from astropy import units as u
 
 from zsdrp.ZSHOOTER import ZSHOOTER
 from zsdrp.steps import *
-from zsdrp.utils import load_instrument_settings, save_spectra_to_ascii
+from zsdrp.utils import load_instrument_settings, save_spectra_to_ascii, yaml_loader
 from pyreduce.combine_frames import combine_bias, combine_calibrate
 
 logger = logging.getLogger(__name__)
@@ -54,6 +54,9 @@ def _reduce_cals(instrument: ZSHOOTER, channel: str, channel_cfg: dict, arc_file
     if flat is None:
         logger.warning(f"No master flat available for channel {channel}, cannot perform trace step.")
         return res
+    if isinstance(instrument, ZSHOOTER) and fhead['DETMODE'] != 'SPEC':
+        detector_settings = yaml_loader(Path(instrument._inst_dir) / f"settings_{fhead['DETMODE']}.yaml")
+        channel_cfg['trace'].update(detector_settings[channel])
     trace_image = flat
     if trace_files is not None and list(trace_files) != list(flat_files):
         trace_image, _ = FlatWrapper.run(trace_files, instrument=instrument, channel=channel, bias=bias, bhead=bhead,
@@ -107,7 +110,8 @@ def _reduce_cals(instrument: ZSHOOTER, channel: str, channel_cfg: dict, arc_file
     res.update({'wave_img': wave_img, 'arc_lines': arc_lines})
     if output_dir is not None:
         # Wavelength calibration assigns the measured traces their physical order numbers.
-        TraceWrapper.save(traces, f"{output_dir}/trace_{channel}.fits")
+        fhead["CALNX"], fhead["CALNY"] = fhead["NAXIS1"], fhead["NAXIS2"]
+        TraceWrapper.save(traces, f"{output_dir}/trace_{channel}.fits.gz", header=fhead)
 
     return res
 
@@ -129,8 +133,22 @@ def _run_per_channel_reduction(instrument: ZSHOOTER, channel: str, channel_cfg: 
     chanres['master_bias'] = (bias, bhead)
 
     if reuse_cals and output_dir is not None:
+        trace_path = Path(output_dir) / f'trace_{channel}.fits.gz'
+        if not trace_path.exists():
+            trace_path = trace_path.with_suffix('')
+        if isinstance(instrument, ZSHOOTER) and trace_path.exists():
+            saved = fits.getheader(trace_path)
+            current = fits.getheader(science_files[0], 1)
+            if saved['DETMODE'] != current['DETMODE']:
+                raise ValueError('Saved calibration uses a different detector package; choose its matching directory or rebuild calibrations.')
+            if (saved['CALNX'], saved['CALNY']) != (current['NAXIS1'], current['NAXIS2']):
+                raise ValueError('Saved calibration has a different detector shape; rebuild calibrations.')
+            from astropy.wcs import WCS
+            old_wcs, new_wcs = WCS(saved, key='D').wcs, WCS(current, key='D').wcs
+            if not (np.array_equal(old_wcs.cdelt, new_wcs.cdelt) and np.array_equal(old_wcs.crpix, new_wcs.crpix) and np.array_equal(old_wcs.crval, new_wcs.crval) and np.array_equal(old_wcs.pc, new_wcs.pc)):
+                raise ValueError('Saved calibration has a different detector WCS; rebuild calibrations.')
         try:
-            traces = TraceWrapper.load(f"{output_dir}/trace_{channel}.fits")
+            traces = TraceWrapper.load(trace_path)
             norm, blaze, slitfunc, slitfunc_meta = NormflatWrapper.load(f"{output_dir}/norm_{channel}.npz")
             with np.load(f"{output_dir}/wavecal_{channel}.npz") as data:
                 wave_img = data['wave_img']
@@ -338,7 +356,7 @@ def run_flux_calibration_and_stitch(results: dict,
 
             if output_dir is not None:
                 suffix = "_fluxcal" if flux_calibrated else "_raw" if lvl == 0 else "_blazecal"
-                new_spectra.save(f"{output_dir}/spectra_{objname}_{channel}{suffix}.fits", steps=steps_run)
+                new_spectra.save(f"{output_dir}/spectra_{objname}_{channel}{suffix}.fits.gz", steps=steps_run)
                 save_spectra_to_ascii(new_spectra, f"{output_dir}/spectra_{objname}_{channel}{suffix}.txt")
 
     # stitch all objects across channels
@@ -350,7 +368,7 @@ def run_flux_calibration_and_stitch(results: dict,
         stitched = splice(specl, simple=all(sp.covariance is not None for sp in specl.data))
         final_spectra[objname] = stitched
         if output_dir is not None:
-            stitched.save(f"{output_dir}/spectra_{objname}_stitched.fits")
+            stitched.save(f"{output_dir}/spectra_{objname}_stitched.fits.gz")
             save_spectra_to_ascii(stitched, f"{output_dir}/spectra_{objname}_stitched.txt")
 
     return final_spectra
