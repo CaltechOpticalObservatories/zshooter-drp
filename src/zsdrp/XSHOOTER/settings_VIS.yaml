@@ -1,0 +1,2 @@
+science:
+  maxiter: 2000  # The 20-day VIS swath converges at iteration 1587 with the unchanged tolerance.

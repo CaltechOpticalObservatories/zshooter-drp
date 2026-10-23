@@ -1,0 +1,2 @@
+science:
+  maxiter: 3000  # The 20-day faint UVB swath converges at iteration 2457 with the unchanged tolerance.

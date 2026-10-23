@@ -5,10 +5,34 @@ from astropy import units as u
 from scipy import sparse
 from pyreduce.spectra import Spectrum, Spectra
 
+from zsdrp.XSHOOTER import XSHOOTER
 from zsdrp.steps import load_prepared_science, BlazeNormalization, ScienceWrapper, splice
+from zsdrp.utils import load_instrument_settings
 from zsdrp.pipe import run_flux_calibration_and_stitch
 
 
+@pytest.mark.parametrize('channel,orientation', [('UVB', 1), ('VIS', 3), ('NIR', 0)])
+def test_prepared_variance_follows_pixel_rotation_and_count_scale(channel, orientation, tmp_path):
+    science = np.arange(35.).reshape(5, 7) - 12
+    variance = np.arange(35.).reshape(5, 7) + 2
+    header = fits.Header({'INSTRUME': 'XSHOOTER', 'ARM': channel, 'GAIN': 2., 'RDNOISE': 4., 'DARK': .02,
+                         'BUNIT': 'adu', 'EXPTIME': 1200., 'DIT': 300., 'NDIT': 4, 'COMBINE': 'average' if channel == 'NIR' else 'sum',
+                         'OBJECT': 'STAR', 'SUBTRACTED': True})
+    path = tmp_path / 'combined.fits'
+    fits.HDUList([fits.PrimaryHDU(header=header), fits.ImageHDU(science), fits.ImageHDU(variance, name='VARIANCE')]).writeto(path)
+    image, var, head = load_prepared_science(path, XSHOOTER(), channel)
+    factor = 8 if channel == 'NIR' else 2
+    np.testing.assert_array_equal(image, np.rot90(science, -orientation) * factor)
+    np.testing.assert_array_equal(var, np.rot90(variance, -orientation) * factor**2)
+    assert image.min() < 0  # Negative sky-subtracted signal must not become a Poisson variance estimate.
+    assert head['COVCOND'] == 'calibrations fixed'
+    assert u.Unit(head['COVUNIT']) == u.electron**2
+    extracted = Spectrum(m=1, spec=image.ravel(), sig=np.sqrt(var.ravel()), covariance=sparse.diags(var.ravel(), format='csr'))
+    extracted_path = tmp_path / 'extracted_electrons.fits'
+    Spectra(header=head, data=[extracted]).save(extracted_path)
+    with fits.open(extracted_path) as saved:
+        assert u.Unit(saved[0].header['COVUNIT']) == u.electron**2
+        assert u.Unit(saved['COV0000'].columns['DATA'].unit) == u.electron**2
 
 
 def test_blaze_division_propagates_off_diagonal_covariance():
@@ -63,3 +87,13 @@ def test_response_and_exposure_scale_flux_and_covariance_together(tmp_path):
     assert u.Unit(results['UVB']['spectra']['STAR'].header['BUNIT']) == flux_unit
 
 
+def test_required_variance_cannot_fall_back_to_residual_noise(tmp_path):
+    header = fits.Header({'INSTRUME': 'XSHOOTER', 'ARM': 'NIR', 'GAIN': 1., 'RON': 4., 'DARK': .02,
+                         'BUNIT': 'electron', 'EXPTIME': 300., 'DIT': 300., 'NDIT': 1, 'COMBINE': 'sum',
+                         'OBJECT': 'STAR', 'HIERARCH SUBTRACTED': True})
+    path=tmp_path/'missing_variance.fits'
+    fits.HDUList([fits.PrimaryHDU(header=header), fits.ImageHDU(np.ones((5, 7)))]).writeto(path)
+    instrument=XSHOOTER()
+    cfg=load_instrument_settings(instrument)['NIR']['science']
+    with pytest.raises(KeyError, match='VARIANCE'):
+        ScienceWrapper.run([str(path)], [], instrument=instrument, channel='NIR', step_cfg=cfg, require_variance=True, print_params=False)
