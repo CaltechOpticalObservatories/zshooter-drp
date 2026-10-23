@@ -1,3 +1,6 @@
 trace:
   filter_y: 20  # whittaker penalty, chosen against the ScopeSim trace model
   border_width: [0, 0, 10, 10]
+
+science:
+  maxiter: 3000  # The 20-day GREEN swath converges at iteration 2083 with the unchanged tolerance.
