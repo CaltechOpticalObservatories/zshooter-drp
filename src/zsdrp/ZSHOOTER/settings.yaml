@@ -5,12 +5,12 @@ bias:
   degree: 0
 
 flat:
-  bias_scaling: exposure_time
+  bias_scaling: number_of_files
   plot: False
 
 trace:
   degree: 4
-  bias_scaling: exposure_time
+  bias_scaling: number_of_files
   filter_y: 20
   filter_type: whittaker
   min_cluster: 20000
@@ -32,9 +32,9 @@ norm_flat:
   plot: False
 
 curvature:
-  dimensionality: 1D  # The analytical model has a constant detector-rotation tilt per order.
+  dimensionality: 2D  # One detector rotation gives a shared tilt across the arm.
   curve_degree: 1
-  degree: 0  # the model tilt is the detector rotation, constant along each order; higher degrees overfit sparse IR orders
+  degree: [0, 0]  # Fit that rotation from all measured lines, including arms with sparse orders.
   curve_height: 50  # rows sampled across the ~64 px slit image; must be several extraction_height to measure a tilt
   extraction_height: 5
   peak_width: 1

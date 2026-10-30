@@ -23,13 +23,15 @@ def detector_header():
 
 @pytest.mark.parametrize('change,expected', [('mode', 'detector package'), ('shape', 'detector shape'), ('pitch', 'detector WCS'), ('position', 'detector WCS'), ('missing', 'DETMODE'), ('same', None)])
 @pytest.mark.parametrize('suffix', ['.fits', '.fits.gz'])
-def test_saved_calibration_must_match_detector(monkeypatch, tmp_path, change, expected, suffix):
+@pytest.mark.parametrize('mode', ['SPEC_ALTDETECT', 'SPEC_ALTDETECT4K'])
+def test_saved_calibration_must_match_detector(monkeypatch, tmp_path, change, expected, suffix, mode):
     header = detector_header()
+    header['DETMODE'] = mode
     traces = [Trace(m=42, pos=np.array([0., 2.]), column_range=(0, 8), height=3)]
     trace_path = tmp_path/f'trace_H{suffix}'
     TraceWrapper.save(traces, trace_path, header=header)
     saved = fits.getheader(trace_path)
-    assert saved['DETMODE'] == 'SPEC_ALTDETECT'
+    assert saved['DETMODE'] == mode
     assert saved['CDELT1D'] == .018
     assert (saved['CALNX'], saved['CALNY']) == (8, 6)
     image = np.zeros((6, 8))
@@ -55,3 +57,21 @@ def test_saved_calibration_must_match_detector(monkeypatch, tmp_path, change, ex
     else:
         result = pipe._run_per_channel_reduction(**arguments)
         assert result['traces'][0].m == 42
+
+
+def test_h4rg_calibration_loads_mode_settings_and_keeps_detector_identity(monkeypatch, tmp_path):
+    image = np.ones((6, 8))
+    header = fits.ImageHDU(image, detector_header()).header
+    header['DETMODE'] = 'SPEC_ALTDETECT4K'
+    header['CDELT1D'] = header['CDELT2D'] = .010
+    traces = [Trace(m=38, pos=np.array([0., 2.]), column_range=(0, 8), height=3)]
+    monkeypatch.setattr(pipe.FlatWrapper, 'run', lambda *a, **kw: (image, header))
+    monkeypatch.setattr(pipe.TraceWrapper, 'run', lambda *a, **kw: traces)
+    config = {'flat': {}, 'trace': {}}
+    disabled = [pipe.ReductionStep.CURVATURE, pipe.ReductionStep.NORM_FLAT, pipe.ReductionStep.WAVECAL]
+    result = pipe._reduce_cals(ZSHOOTER(), 'K', config, [], [], None, None, disabled, tmp_path)
+    assert config['trace']['min_cluster'] == 1000
+    assert result['traces'][0].m == 38
+    saved = fits.getheader(tmp_path/'trace_K.fits.gz')
+    assert saved['DETMODE'] == 'SPEC_ALTDETECT4K'
+    assert saved['CDELT1D'] == .010
