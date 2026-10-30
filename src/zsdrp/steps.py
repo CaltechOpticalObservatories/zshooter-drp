@@ -514,8 +514,29 @@ def simple_wavesol(image: np.ndarray,
         dlam_col = o['dlam'][centre_row, cols]
         peaks, _ = find_peaks(spec, prominence=max(10 * np.median(spec[ok]), 50.0), distance=6)
         for p in peaks[(peaks > halfwin + 2) & (peaks < spec.size - halfwin - 3)]:
-            win = np.arange(p - halfwin, p + halfwin + 1)
-            background = 0.5 * (spec[p - halfwin - 2] + spec[p + halfwin + 2])
+            # A fitted centre can move by at most 2.5 pixels; peaks farther
+            # from every lamp line cannot pass the existing match criterion.
+            match_low = min(lam_col[p-3:p+4]) - 3*dlam_col[p]
+            match_high = max(lam_col[p-3:p+4]) + 3*dlam_col[p]
+            if np.searchsorted(line_waves, match_low) == np.searchsorted(line_waves, match_high):
+                continue
+            window = halfwin
+            if header['INSTRUME'] != 'XSHOOTER':
+                slit_key = 'vis_curr_slit' if int(header['ID']) < 3 else 'nir_curr_slit'
+                slit_width = header[f'SIM CONFIG INST {slit_key}']
+                spectral_width = abs(o['trace'].slit_dispersion(lam_col[p]/1e4)) * 1e4 * slit_width / dlam_col[p]
+                spatial_width = np.ptp(o['lam'][good[:, p], p]) / dlam_col[p]
+                width_guess = max(spectral_width, spatial_width)
+                # The narrower uniform projection and detector pixel add their
+                # second moments; sigma remains fitted, including lamp width.
+                sigma_guess = np.sqrt((min(spectral_width, spatial_width)**2 + 1)/12)
+                window = max(halfwin, int(np.ceil(width_guess/2 + 3*sigma_guess)))
+            if p <= window+2 or p >= spec.size-window-3:
+                continue
+            win = np.arange(p-window, p+window+1)
+            background = 0.5 * (spec[p-window-2] + spec[p+window+2])
+            if spec[p] <= background:
+                continue
             if header['INSTRUME'] == 'XSHOOTER':
                 slit_width = float(str(header['SLIT']).removesuffix('JH'))
                 width_pix = abs(o['trace'].slit_dispersion(lam_col[p] / 1e4)) * 1e4 * slit_width / dlam_col[p]
@@ -523,10 +544,11 @@ def simple_wavesol(image: np.ndarray,
                 p0 = [spec[p] - background, p, width_pix, optical_sigma, background]
                 bounds = ([0, p - 2.5, width_pix * .5, optical_sigma * .5, -np.inf], [np.inf, p + 2.5, width_pix * 1.5, max(optical_sigma * 2, 1), np.inf])
             else:
-                p0 = [spec[p] - background, p, 4.4, 0.6, background]
-                bounds = ([0, p - 2.5, 2.5, 0.2, -np.inf], [np.inf, p + 2.5, 7.0, 2.5, np.inf])
+                peak_fraction = slit_line_profile(p, 1., p, width_guess, sigma_guess, 0.)
+                p0 = [(spec[p]-background)/peak_fraction, p, width_guess, sigma_guess, background]
+                bounds = ([0, p-2.5, width_guess/2, np.finfo(float).eps, -np.inf], [np.inf, p+2.5, 1.5*width_guess, window, np.inf])
             try:
-                popt, pcov = curve_fit(slit_line_profile, win, spec[win], p0=p0, sigma=noise[win], bounds=bounds, maxfev=4000)
+                popt, pcov = curve_fit(slit_line_profile, win, spec[win], p0=p0, sigma=noise[win], bounds=bounds, maxfev=4000, x_scale="jac", jac=_slit_line_jacobian)
             except (RuntimeError, ValueError):
                 continue
             amplitude, centre, width = popt[0], popt[1], popt[2]
@@ -596,6 +618,14 @@ def slit_line_profile(x, amplitude, centre, width, sigma, background):
     upper = (x - centre + width / 2) / (np.sqrt(2) * sigma)
     lower = (x - centre - width / 2) / (np.sqrt(2) * sigma)
     return 0.5 * amplitude * (erf(upper) - erf(lower)) + background
+
+
+def _slit_line_jacobian(x, amplitude, centre, width, sigma, background):
+    upper = (x-centre+width/2)/(np.sqrt(2)*sigma)
+    lower = (x-centre-width/2)/(np.sqrt(2)*sigma)
+    eu, el = np.exp(-upper**2), np.exp(-lower**2)
+    scale = amplitude/(np.sqrt(2*np.pi)*sigma)
+    return np.column_stack((.5*(erf(upper)-erf(lower)), scale*(el-eu), .5*scale*(eu+el), amplitude*(lower*el-upper*eu)/(np.sqrt(np.pi)*sigma), np.ones_like(x)))
 
 
 def load_prepared_science(filename, instrument, channel, mask=None):
