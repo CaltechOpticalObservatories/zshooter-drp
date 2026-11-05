@@ -10,5 +10,6 @@ keywords, and the WKMO KOA data archive.
 :hidden:
 
 getting-started
+design
 api/index
-
+```

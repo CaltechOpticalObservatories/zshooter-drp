@@ -16,6 +16,7 @@ extensions = [
     "sphinx_autodoc_typehints",
     "sphinx_copybutton",
     "sphinx_design",
+    "sphinxcontrib.mermaid",
 ]
 autosummary_generate = True
 autodoc_typehints = "description"
@@ -28,6 +29,7 @@ html_theme = "furo"
 
 # MyST Markdown
 myst_enable_extensions = ["colon_fence", "deflist", "linkify"]
+myst_fence_as_directive = ["mermaid"]  # render ```mermaid fences as diagrams, not code blocks
 source_suffix = {".rst": "restructuredtext", ".md": "markdown"}
 
 # Clean API index if empty (avoids warnings in fresh clones)
