@@ -71,7 +71,7 @@ def _reduce_cals(instrument: ZSHOOTER, channel: str, channel_cfg: dict, arc_file
         logger.warning(f"No arc files found for channel {channel}, check your input files. "
                        f"Skipping arc combination and curvature correction for this channel.")
     else:
-        arc = combine_calibrate(files=list(arc_files), instrument=instrument, channel=channel, bias=bias, bhead=bhead)
+        arc = combine_calibrate(files=list(arc_files), instrument=instrument, channel=channel, bias=bias, bhead=bhead, bias_scaling=channel_cfg["flat"]["bias_scaling"])
         logger.info("Combined arc files successfully.")
         traces = CurvatureWrapper.run(arc[0], traces, step_cfg=channel_cfg[ReductionStep.CURVATURE], **kwargs)
         logger.info("Curvature correction created successfully.")
@@ -102,7 +102,7 @@ def _reduce_cals(instrument: ZSHOOTER, channel: str, channel_cfg: dict, arc_file
                        f"Skipping wavecal for this channel.")
     else:
         arc = combine_calibrate(files=list(arc_files), instrument=instrument, channel=channel, bias=bias,
-                                bhead=bhead, norm=norm, traces=traces)
+                                bhead=bhead, norm=norm, traces=traces, bias_scaling=channel_cfg["flat"]["bias_scaling"])
         wave_img, arc_lines = simple_wavesol(arc[0], arc[1], traces, trace_list=kwargs.get('trace_list'), lamp_lines=kwargs.get('lamp_lines'))
         if output_dir is not None:
             orders = [t.m for t in traces if not t.invalid]
