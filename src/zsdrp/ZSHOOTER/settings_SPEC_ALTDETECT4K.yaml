@@ -1,0 +1,26 @@
+# The same 2 arcsec illuminated-slit tracing was verified on the H4RG K
+# frame: all eight K orders are retained at the configured 10 micron pitch.
+BLUE:
+  filter_type: boxcar
+  filter_y: 31
+  filter_x: 15
+  noise: 30
+  noise_relative: 0
+  min_cluster: 1500
+  min_width: 0.2
+  border_width: 0
+  closing_shape: [1, 3]
+GREEN: &short_trace
+  filter_type: boxcar
+  filter_y: 21
+  filter_x: 9
+  noise: 30
+  noise_relative: 0
+  min_cluster: 1000
+  min_width: 0.1
+  border_width: 0
+  closing_shape: [1, 2]
+RED: *short_trace
+YJ: *short_trace
+H: *short_trace
+K: *short_trace

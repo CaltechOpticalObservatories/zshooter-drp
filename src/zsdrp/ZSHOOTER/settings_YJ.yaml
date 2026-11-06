@@ -1,7 +1,13 @@
 trace:
-  filter_y: 100  # whittaker penalty, chosen against the ScopeSim trace model
-  min_cluster: 20000
-  border_width: [260, 0, 50, 50]
+  degree: 2  # Stable for order 80's short illuminated segment.
+  filter_type: boxcar
+  filter_y: 21
+  filter_x: 9
+  noise: 2
+  noise_relative: 0
+  min_cluster: 1000
+  min_width: 0.1  # Retain the partially illuminated blue orders.
+  border_width: 0
   closing_shape: [1, 2]
 
 curvature:

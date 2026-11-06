@@ -1,0 +1,7 @@
+channel,lower_A,upper_A,median_scene_over_transient_input
+BLUE,3500,4000,1.082
+GREEN,4800,6000,1.011
+RED,8000,8800,1.005
+YJ,12000,13000,1.007
+H,15500,17000,1.009
+K,21000,22000,1.002

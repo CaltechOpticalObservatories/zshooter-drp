@@ -5,3 +5,6 @@ trace:
 
 norm_flat:
   threshold: 50
+
+science:
+  maxiter: 4000  # The detector-package 20-day BLUE profile needs 3304 native iterations at the unchanged tolerance.

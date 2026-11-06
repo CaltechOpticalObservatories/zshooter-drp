@@ -1,0 +1,4 @@
+norm_flat:
+  extraction_height: 50  # Central 10.5 arcsec of the 11 arcsec NIR slit.
+trace:
+  noise: 30  # Above the 25.6 e short-DIT read noise after 9-column smoothing.

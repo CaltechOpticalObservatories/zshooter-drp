@@ -2,7 +2,7 @@ trace:
   filter_y: 100  # whittaker penalty, chosen against the ScopeSim trace model
   min_cluster: 20000
 #  filter_type: boxcar
-  border_width: [0, 0, 0, 0]
+  border_width: [100, 100, 0, 0]  # Exclude edge artifacts outside orders 42--51.
 
 curvature:
   window_width: 9
