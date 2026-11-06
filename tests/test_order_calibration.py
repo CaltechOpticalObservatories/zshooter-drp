@@ -53,9 +53,10 @@ def test_zero_flat_response_is_excluded_from_flux_and_variance():
     assert np.isfinite(reduced.spec).all() and np.isfinite(reduced.sig).all()
 
 
-def test_trace_roundtrip_preserves_physical_orders_and_measured_support(tmp_path):
+@pytest.mark.parametrize('suffix', ['.fits', '.fits.gz'])
+def test_trace_roundtrip_preserves_physical_orders_and_measured_support(tmp_path, suffix):
     traces = [Trace(m=80, pos=np.array([.01, 50.]), column_range=(1340, 1840)), Trace(m=58, pos=np.array([.02, 1900.]), column_range=(0, 2048))]
-    filename = str(tmp_path / 'trace.fits')
+    filename = str(tmp_path / f'trace{suffix}')
     TraceWrapper.save(traces, filename)
     loaded = TraceWrapper.load(filename)
     assert [t.m for t in loaded] == [80, 58]
