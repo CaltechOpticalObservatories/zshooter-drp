@@ -36,7 +36,7 @@ from scipy import sparse
 from scipy.signal import find_peaks
 from scipy.special import erf
 
-from zsdrp.utils import patched_extract_tqdm
+from zsdrp.utils import patched_extract_tqdm, detector_to_extraction, extraction_to_detector
 
 logger = logging.getLogger(__name__)
 
@@ -199,9 +199,9 @@ class TraceWrapper(Step):
         return trace(image, **params)
 
     @staticmethod
-    def save(traces, filename):
+    def save(traces, filename, header=None):
         os.makedirs(os.path.dirname(filename), exist_ok=True)
-        save_traces(filename, traces, steps=[TraceWrapper.name])
+        save_traces(filename, traces, header=header, steps=[TraceWrapper.name])
 
     @staticmethod
     def load(filename):
@@ -245,6 +245,7 @@ class CurvatureWrapper(Step):
                 t.slit = fitted_coeffs[i]
             if slitdeltas is not None and i < slitdeltas.shape[0]:
                 t.slitdelta = slitdeltas[i]
+                t.slitdelta_y = curvature['slitdelta_y'][i]
         return traces
 
 
@@ -426,7 +427,9 @@ def simple_wavesol(image: np.ndarray,
                    blend_ratio: float = 0.01,
                    halfwin: int = 7,
                    min_lines: int = 10,
-                   min_lines_order: int = 8):
+                   min_lines_order: int = 8,
+                   trace_list=None,
+                   lamp_lines=None):
     """
     Wavelength solution from the ScopeSim analytical trace list that generated the frames, corrected with the arc
     lines exactly as in echelle_reduction.py (ChannelGeometry, arc_check, apply_wavelength_correction).
@@ -450,16 +453,25 @@ def simple_wavesol(image: np.ndarray,
     """
     from scopesim.effects import EchelleSpectralTraceList
 
-    inst_dir = Path(header['SIM CONFIG SIM file local_packages_path']) / header['INSTRUME']
-    with open(inst_dir / 'ZShooter_SPEC.yaml') as f:
-        effect = next(e for e in yaml.safe_load(f)['effects'] if e['name'] == 'trace_list_analytical')
-    trace_list = EchelleSpectralTraceList(**{**effect['kwargs'], 'filename': str(inst_dir / effect['kwargs']['filename'])})
+    if trace_list is None or lamp_lines is None:
+        inst_dir = Path(header['SIM CONFIG SIM file local_packages_path']) / header['INSTRUME']
+    if trace_list is None:
+        with open(inst_dir / 'ZShooter_SPEC.yaml') as f:
+            effect = next(e for e in yaml.safe_load(f)['effects'] if e['name'] == 'trace_list_analytical')
+        from scopesim import UserCommands
+        commands = UserCommands(use_instrument='ZShooter_v2', set_modes=[header['DETMODE']])
+        for arm in ('b', 'g', 'r', 'yj', 'h', 'k'):
+            commands[f'!DET.pixel_size_{arm}'] = header[f'SIM CONFIG DET pixel_size_{arm}']
+        trace_list = EchelleSpectralTraceList(cmds=commands, **{**effect['kwargs'], 'filename': str(inst_dir / effect['kwargs']['filename'])})
     spectral_traces = [st for st in trace_list.spectral_traces.values() if st.meta['image_plane_id'] == int(header['ID'])]
 
     # lamp line list, amplitudes normalised per file as when the arc source was built
-    tables = [Table.read(inst_dir / 'lamp_lines' / name, delimiter='|', format='ascii', header_start=0) for name in lamp_files]
-    line_waves = np.concatenate([np.asarray(t['wave'], dtype=float) for t in tables])
-    line_amps = np.concatenate([np.asarray(t['amplitude'], dtype=float) / np.nanmax(t['amplitude']) for t in tables])
+    if lamp_lines is None:
+        tables = [Table.read(inst_dir / 'lamp_lines' / name, delimiter='|', format='ascii', header_start=0) for name in lamp_files]
+        line_waves = np.concatenate([np.asarray(t['wave'], dtype=float) for t in tables])
+        line_amps = np.concatenate([np.asarray(t['amplitude'], dtype=float) / np.max(t['amplitude']) for t in tables])
+    else:
+        line_waves, line_amps = lamp_lines['wave'], lamp_lines['amplitude']
     line_amps, line_waves = line_amps[np.argsort(line_waves)], np.sort(line_waves)
 
     # per-pixel wavelength [A] and slit position [arcsec] in each order's bounding box
@@ -467,12 +479,13 @@ def simple_wavesol(image: np.ndarray,
     ny, nx = image.shape
     orders = []
     for st in spectral_traces:
-        xpix, ypix = wcs.all_world2pix(*st.footprint(), 0)
+        xpix, ypix = detector_to_extraction(*wcs.all_world2pix(*st.footprint(), 0), header)
         x0, x1 = int(np.clip(np.floor(xpix.min()) - 2, 0, nx)), int(np.clip(np.ceil(xpix.max()) + 3, 0, nx))
         y0, y1 = int(np.clip(np.floor(ypix.min()) - 2, 0, ny)), int(np.clip(np.ceil(ypix.max()) + 3, 0, ny))
         if x1 - x0 < 20 or y1 - y0 < 10:
             continue
-        xmm, ymm = wcs.all_pix2world(*np.meshgrid(np.arange(x0, x1), np.arange(y0, y1)), 0)
+        xraw, yraw = extraction_to_detector(*np.meshgrid(np.arange(x0, x1), np.arange(y0, y1)), header)
+        xmm, ymm = wcs.all_pix2world(xraw, yraw, 0)
         lam = st.xy2lam(xmm, ymm) * 1e4
         xi = st.xy2xi(xmm, ymm)
         inside = (np.abs(xi) <= np.abs(st.table['s']).max()) & (lam >= st.wave_min * 1e4) & (lam <= st.wave_max * 1e4)
@@ -501,12 +514,41 @@ def simple_wavesol(image: np.ndarray,
         dlam_col = o['dlam'][centre_row, cols]
         peaks, _ = find_peaks(spec, prominence=max(10 * np.median(spec[ok]), 50.0), distance=6)
         for p in peaks[(peaks > halfwin + 2) & (peaks < spec.size - halfwin - 3)]:
-            win = np.arange(p - halfwin, p + halfwin + 1)
-            background = 0.5 * (spec[p - halfwin - 2] + spec[p + halfwin + 2])
-            p0 = [spec[p] - background, p, 4.4, 0.6, background]
-            bounds = ([0, p - 2.5, 2.5, 0.2, -np.inf], [np.inf, p + 2.5, 7.0, 2.5, np.inf])
+            # A fitted centre can move by at most 2.5 pixels; peaks farther
+            # from every lamp line cannot pass the existing match criterion.
+            match_low = min(lam_col[p-3:p+4]) - 3*dlam_col[p]
+            match_high = max(lam_col[p-3:p+4]) + 3*dlam_col[p]
+            if np.searchsorted(line_waves, match_low) == np.searchsorted(line_waves, match_high):
+                continue
+            window = halfwin
+            if header['INSTRUME'] != 'XSHOOTER':
+                slit_key = 'vis_curr_slit' if int(header['ID']) < 3 else 'nir_curr_slit'
+                slit_width = header[f'SIM CONFIG INST {slit_key}']
+                spectral_width = abs(o['trace'].slit_dispersion(lam_col[p]/1e4)) * 1e4 * slit_width / dlam_col[p]
+                spatial_width = np.ptp(o['lam'][good[:, p], p]) / dlam_col[p]
+                width_guess = max(spectral_width, spatial_width)
+                # The narrower uniform projection and detector pixel add their
+                # second moments; sigma remains fitted, including lamp width.
+                sigma_guess = np.sqrt((min(spectral_width, spatial_width)**2 + 1)/12)
+                window = max(halfwin, int(np.ceil(width_guess/2 + 3*sigma_guess)))
+            if p <= window+2 or p >= spec.size-window-3:
+                continue
+            win = np.arange(p-window, p+window+1)
+            background = 0.5 * (spec[p-window-2] + spec[p+window+2])
+            if spec[p] <= background:
+                continue
+            if header['INSTRUME'] == 'XSHOOTER':
+                slit_width = float(str(header['SLIT']).removesuffix('JH'))
+                width_pix = abs(o['trace'].slit_dispersion(lam_col[p] / 1e4)) * 1e4 * slit_width / dlam_col[p]
+                optical_sigma = lam_col[p] / o['trace'].meta['optical_resolving_power'] / 2.35482 / dlam_col[p]
+                p0 = [spec[p] - background, p, width_pix, optical_sigma, background]
+                bounds = ([0, p - 2.5, width_pix * .5, optical_sigma * .5, -np.inf], [np.inf, p + 2.5, width_pix * 1.5, max(optical_sigma * 2, 1), np.inf])
+            else:
+                peak_fraction = slit_line_profile(p, 1., p, width_guess, sigma_guess, 0.)
+                p0 = [(spec[p]-background)/peak_fraction, p, width_guess, sigma_guess, background]
+                bounds = ([0, p-2.5, width_guess/2, np.finfo(float).eps, -np.inf], [np.inf, p+2.5, 1.5*width_guess, window, np.inf])
             try:
-                popt, pcov = curve_fit(slit_line_profile, win, spec[win], p0=p0, sigma=noise[win], bounds=bounds, maxfev=4000)
+                popt, pcov = curve_fit(slit_line_profile, win, spec[win], p0=p0, sigma=noise[win], bounds=bounds, maxfev=4000, x_scale="jac", jac=_slit_line_jacobian)
             except (RuntimeError, ValueError):
                 continue
             amplitude, centre, width = popt[0], popt[1], popt[2]
@@ -558,7 +600,8 @@ def simple_wavesol(image: np.ndarray,
     x = np.arange(nx)
     wave_img = np.zeros((len(traces), nx))
     for i, t in enumerate(traces):
-        xmm, ymm = wcs.all_pix2world(x, t.y_at_x(x), 0)
+        xraw, yraw = extraction_to_detector(x, t.y_at_x(x), header)
+        xmm, ymm = wcs.all_pix2world(xraw, yraw, 0)
         cols = slice(*t.column_range)
         st = min(spectral_traces, key=lambda s: np.median(np.abs(s.xy2xi(xmm[cols], ymm[cols]))))
         t.m = int(st.trace_id.rsplit('_', 1)[1])
@@ -575,6 +618,14 @@ def slit_line_profile(x, amplitude, centre, width, sigma, background):
     upper = (x - centre + width / 2) / (np.sqrt(2) * sigma)
     lower = (x - centre - width / 2) / (np.sqrt(2) * sigma)
     return 0.5 * amplitude * (erf(upper) - erf(lower)) + background
+
+
+def _slit_line_jacobian(x, amplitude, centre, width, sigma, background):
+    upper = (x-centre+width/2)/(np.sqrt(2)*sigma)
+    lower = (x-centre-width/2)/(np.sqrt(2)*sigma)
+    eu, el = np.exp(-upper**2), np.exp(-lower**2)
+    scale = amplitude/(np.sqrt(2*np.pi)*sigma)
+    return np.column_stack((.5*(erf(upper)-erf(lower)), scale*(el-eu), .5*scale*(eu+el), amplitude*(lower*el-upper*eu)/(np.sqrt(np.pi)*sigma), np.ones_like(x)))
 
 
 def load_prepared_science(filename, instrument, channel, mask=None):
