@@ -29,20 +29,18 @@ def load_settings(path: str | Path, instrument: str) -> dict:
         raise ValueError(f'unknown settings file type: {path}')
     return load_config(cfg, instrument=instrument)
 
-def load_zshooter_settings(zshooter_instrument: zshooter_package.ZSHOOTER | None = None) -> dict:
+def load_instrument_settings(instrument) -> dict:
     """
     Adds support for yaml settings files in addition to json.
     Calls pyreduce.configuration.load_config after loading yaml as dict if input is yaml, else calls it directly.
     """
-    zs = zshooter_instrument if zshooter_instrument is not None else zshooter_package.ZSHOOTER()
-
-    base = Path(zshooter_package.__file__).resolve().parent / 'settings.yaml'
+    base = Path(instrument._inst_dir) / 'settings.yaml'
     if not base.exists():
         raise ValueError(f'settings file does not exist: {base}')
-    base_cfg = load_settings(base, instrument='ZSHOOTER')
+    base_cfg = load_settings(base, instrument=instrument.name.upper())
 
     cfgs = {}
-    for channel in zs.config.channels:
+    for channel in instrument.config.channels:
         chan = Path(base).parent / f'settings_{channel}.yaml'
         if not chan.exists():
             raise ValueError(f'requested channel settings file does not exist: {chan}')
@@ -53,6 +51,27 @@ def load_zshooter_settings(zshooter_instrument: zshooter_package.ZSHOOTER | None
                 cfg[k].update(v)
         cfgs[channel] = cfg
     return cfgs
+
+def load_zshooter_settings(zshooter_instrument=None):
+    instrument = zshooter_instrument if zshooter_instrument is not None else zshooter_package.ZSHOOTER()
+    return load_instrument_settings(instrument)
+
+
+def detector_to_extraction(x, y, header):
+    """Raw detector pixels to the orientation returned by Instrument.load_fits."""
+    nx, ny = header['e_xhi'], header['e_yhi']
+    assert header['e_xlo'] == header['e_ylo'] == 0 and not header['e_transpose']
+    orientation = header['e_orient'] % 4
+    return ((x, y), (ny - 1 - y, x), (nx - 1 - x, ny - 1 - y), (y, nx - 1 - x))[orientation]
+
+
+def extraction_to_detector(x, y, header):
+    """Undo extraction rotation before evaluating the original detector WCS."""
+    nx, ny = header['e_xhi'], header['e_yhi']
+    assert header['e_xlo'] == header['e_ylo'] == 0 and not header['e_transpose']
+    orientation = header['e_orient'] % 4
+    return ((x, y), (y, ny - 1 - x), (nx - 1 - x, ny - 1 - y), (nx - 1 - y, x))[orientation]
+
 
 def save_image_to_fits(image, header, filename: str):
     """

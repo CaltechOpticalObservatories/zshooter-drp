@@ -3,10 +3,11 @@ from pathlib import Path
 from typing import Optional, Any, Sequence
 import logging
 import enum
+from astropy import units as u
 
 from zsdrp.ZSHOOTER import ZSHOOTER
 from zsdrp.steps import *
-from zsdrp.utils import load_zshooter_settings, save_spectra_to_ascii
+from zsdrp.utils import load_instrument_settings, save_spectra_to_ascii, yaml_loader
 from pyreduce.combine_frames import combine_bias, combine_calibrate
 
 logger = logging.getLogger(__name__)
@@ -28,15 +29,6 @@ class Channel(enum.StrEnum):
     YJ = "YJ"
     H = "H"
     K = "K"
-
-def _validate_channel(chankey: str | Channel) -> Channel:
-    if isinstance(chankey, Channel):
-        return chankey
-    try:
-        valkey = Channel(chankey)
-        return valkey
-    except ValueError as e:
-        raise ValueError(f"Invalid channel: {chankey}. Valid options are: {[chan.value for chan in Channel]}") from e
 
 def _validate_step(stepkey: str | ReductionStep) -> ReductionStep:
     if isinstance(stepkey, ReductionStep):
@@ -62,6 +54,9 @@ def _reduce_cals(instrument: ZSHOOTER, channel: str, channel_cfg: dict, arc_file
     if flat is None:
         logger.warning(f"No master flat available for channel {channel}, cannot perform trace step.")
         return res
+    if isinstance(instrument, ZSHOOTER) and fhead['DETMODE'] != 'SPEC':
+        detector_settings = yaml_loader(Path(instrument._inst_dir) / f"settings_{fhead['DETMODE']}.yaml")
+        channel_cfg['trace'].update(detector_settings[channel])
     trace_image = flat
     if trace_files is not None and list(trace_files) != list(flat_files):
         trace_image, _ = FlatWrapper.run(trace_files, instrument=instrument, channel=channel, bias=bias, bhead=bhead,
@@ -76,7 +71,7 @@ def _reduce_cals(instrument: ZSHOOTER, channel: str, channel_cfg: dict, arc_file
         logger.warning(f"No arc files found for channel {channel}, check your input files. "
                        f"Skipping arc combination and curvature correction for this channel.")
     else:
-        arc = combine_calibrate(files=list(arc_files), instrument=instrument, channel=channel, bias=bias, bhead=bhead)
+        arc = combine_calibrate(files=list(arc_files), instrument=instrument, channel=channel, bias=bias, bhead=bhead, bias_scaling=channel_cfg["flat"]["bias_scaling"])
         logger.info("Combined arc files successfully.")
         traces = CurvatureWrapper.run(arc[0], traces, step_cfg=channel_cfg[ReductionStep.CURVATURE], **kwargs)
         logger.info("Curvature correction created successfully.")
@@ -107,15 +102,16 @@ def _reduce_cals(instrument: ZSHOOTER, channel: str, channel_cfg: dict, arc_file
                        f"Skipping wavecal for this channel.")
     else:
         arc = combine_calibrate(files=list(arc_files), instrument=instrument, channel=channel, bias=bias,
-                                bhead=bhead, norm=norm, traces=traces)
-        wave_img, arc_lines = simple_wavesol(arc[0], arc[1], traces)
+                                bhead=bhead, norm=norm, traces=traces, bias_scaling=channel_cfg["flat"]["bias_scaling"])
+        wave_img, arc_lines = simple_wavesol(arc[0], arc[1], traces, trace_list=kwargs.get('trace_list'), lamp_lines=kwargs.get('lamp_lines'))
         if output_dir is not None:
             orders = [t.m for t in traces if not t.invalid]
             np.savez(f"{output_dir}/wavecal_{channel}.npz", wave_img=wave_img, orders=orders, arc_lines=arc_lines.as_array())
     res.update({'wave_img': wave_img, 'arc_lines': arc_lines})
     if output_dir is not None:
         # Wavelength calibration assigns the measured traces their physical order numbers.
-        TraceWrapper.save(traces, f"{output_dir}/trace_{channel}.fits")
+        fhead["CALNX"], fhead["CALNY"] = fhead["NAXIS1"], fhead["NAXIS2"]
+        TraceWrapper.save(traces, f"{output_dir}/trace_{channel}.fits.gz", header=fhead)
 
     return res
 
@@ -137,8 +133,22 @@ def _run_per_channel_reduction(instrument: ZSHOOTER, channel: str, channel_cfg: 
     chanres['master_bias'] = (bias, bhead)
 
     if reuse_cals and output_dir is not None:
+        trace_path = Path(output_dir) / f'trace_{channel}.fits.gz'
+        if not trace_path.exists():
+            trace_path = trace_path.with_suffix('')
+        if isinstance(instrument, ZSHOOTER) and trace_path.exists():
+            saved = fits.getheader(trace_path)
+            current = fits.getheader(science_files[0], 1)
+            if saved['DETMODE'] != current['DETMODE']:
+                raise ValueError('Saved calibration uses a different detector package; choose its matching directory or rebuild calibrations.')
+            if (saved['CALNX'], saved['CALNY']) != (current['NAXIS1'], current['NAXIS2']):
+                raise ValueError('Saved calibration has a different detector shape; rebuild calibrations.')
+            from astropy.wcs import WCS
+            old_wcs, new_wcs = WCS(saved, key='D').wcs, WCS(current, key='D').wcs
+            if not (np.array_equal(old_wcs.cdelt, new_wcs.cdelt) and np.array_equal(old_wcs.crpix, new_wcs.crpix) and np.array_equal(old_wcs.crval, new_wcs.crval) and np.array_equal(old_wcs.pc, new_wcs.pc)):
+                raise ValueError('Saved calibration has a different detector WCS; rebuild calibrations.')
         try:
-            traces = TraceWrapper.load(f"{output_dir}/trace_{channel}.fits")
+            traces = TraceWrapper.load(trace_path)
             norm, blaze, slitfunc, slitfunc_meta = NormflatWrapper.load(f"{output_dir}/norm_{channel}.npz")
             with np.load(f"{output_dir}/wavecal_{channel}.npz") as data:
                 wave_img = data['wave_img']
@@ -185,32 +195,40 @@ def run_reduction(files: dict[Channel, dict[str, Any]],
                   disable_steps: Optional[list[ReductionStep]] = None,
                   disable_all_plots: bool = False,
                   reuse_cals: bool = True,
+                  instrument=None,
+                  trace_list=None,
+                  lamp_lines=None,
                   **kwargs):
     """
-    Run the full reduction pipeline for ZSHOOTER data.
+    Run the reduction pipeline with a configured instrument and optional ScopeSim trace list.
     :param files: Nested dict of files for each channel.
                   The optional 'trace' group supplies order-definition frames separately from the full-slit flat.
-    :param channels: List of channels to reduce. If None, all channels will be reduced. Options are BLUE, GREEN, RED, YJ, H, K.
+    :param channels: Instrument channel names to reduce; None selects all configured channels.
     :param output_dir: Directory to save the output files. If None, files will not be saved.
     :param disable_steps: List of steps to disable during the reduction. If None, all steps will be run. Options include: mask, scatter, trace, curvature, norm_flat, wavecal, science, continuum.
     :param disable_all_plots: If True, all diagnostic plotting will be disabled during the reduction.
     :param reuse_cals: If True, reuse existing reduced calibration files if they exist.
+    :param instrument: PyReduce Instrument; defaults to the existing ZSHOOTER configuration.
+    :param trace_list: Configured ScopeSim spectral trace list used by the observation.
+    :param lamp_lines: Lamp table with vacuum wavelengths in Angstrom and relative amplitudes.
+    :keyword require_variance: Require prepared SCI+VARIANCE inputs; missing variance fails instead of using legacy uncertainties.
     :keyword print_params: If True, print the parameters for each step during the reduction.
 
     :return: Dictionary containing the results of the reduction for each channel.
     """
     # load instrument
-    zs = ZSHOOTER()
+    zs = ZSHOOTER() if instrument is None else instrument
 
     # load step settings
-    settings_cfg = load_zshooter_settings(zshooter_instrument=zs)
+    settings_cfg = load_instrument_settings(zs)
 
     # validate input files
-    files = {_validate_channel(chankey): filedict for chankey, filedict in files.items()}
-
-    # validate channels
-    channels = [chan for chan in Channel] if channels is None else channels if isinstance(channels, list) else [channels]
-    channels = [_validate_channel(chan) for chan in channels]
+    files = {str(chankey): filedict for chankey, filedict in files.items()}
+    channels = zs.config.channels if channels is None else channels if isinstance(channels, list) else [channels]
+    channels = [str(chan) for chan in channels]
+    for channel in channels:
+        if channel not in zs.config.channels:
+            raise ValueError(f'{channel} is not a channel of {zs.name}')
 
     # validate output_dir
     if output_dir is not None and Path(output_dir).resolve().is_dir():
@@ -224,9 +242,15 @@ def run_reduction(files: dict[Channel, dict[str, Any]],
 
     # load free spectral ranges for ZSHOOTER
     fsrs = dict()
-    with np.load(os.path.join(zs._inst_dir, 'free_spectral_ranges.npz')) as f:
-        for chan in channels:
-            fsrs[chan] = dict(zip(f[f'{chan.value}_orders'], f[chan.value], strict=True))
+    if isinstance(zs, ZSHOOTER):
+        with np.load(os.path.join(zs._inst_dir, 'free_spectral_ranges.npz')) as f:
+            for chan in channels:
+                fsrs[chan] = dict(zip(f[f'{chan}_orders'], f[chan], strict=True))
+    else:
+        for channel in channels:
+            arm_id = zs.config.channels.index(channel)
+            fsrs[channel] = {int(st.trace_id.rsplit('_', 1)[1]): (st.wave_min * 1e4, st.wave_max * 1e4)
+                             for st in trace_list.spectral_traces.values() if st.meta['image_plane_id'] == arm_id}
 
     # run reduction for each channel
     results = dict() # for per channel intermediate results and calibration products
@@ -236,20 +260,20 @@ def run_reduction(files: dict[Channel, dict[str, Any]],
             logger.warning(f"No files found for channel {channel}, skipping reduction for this channel.")
             continue
         chanfiles = files[channel]
-        chancfg = settings_cfg[channel.value]
+        chancfg = settings_cfg[channel]
 
         if disable_all_plots:
             for key in chancfg.keys():
                 if 'plot' in chancfg[key]:
                     chancfg[key]['plot'] = False
 
-        chanres = _run_per_channel_reduction(zs, channel.value, chancfg, science_files=chanfiles.get('science', []),
+        chanres = _run_per_channel_reduction(zs, channel, chancfg, science_files=chanfiles.get('science', []),
                                             bias_files=chanfiles.get('bias', []),
                                             arc_files=chanfiles.get('wavecal_master', []),
                                             flat_files=chanfiles.get('flat', []),
                                             trace_files=chanfiles.get('trace'),
                                             free_spectral_range=fsrs[channel], disable_steps=disable_steps,
-                                            output_dir=output_dir, reuse_cals=reuse_cals, **kwargs)
+                                            output_dir=output_dir, reuse_cals=reuse_cals, trace_list=trace_list, lamp_lines=lamp_lines, **kwargs)
         chanres['steps_run'] = [step.value for step in ReductionStep if step not in disable_steps]
         results[channel] = chanres
     return results
@@ -265,7 +289,7 @@ def run_flux_calibration_and_stitch(results: dict,
     Run flux calibration and stitch spectra across channels.
     :param results: Dictionary containing the results of the reduction for each channel.
     :param reference_wave: Optional reference wavelength array for flux normalization.
-    :param reference_flux: Optional reference flux array for flux normalization.
+    :param reference_flux: Optional reference flux density in erg/s/cm2/Angstrom, evaluated at reference_wave in Angstrom.
     :param standard_star_name: Name of the standard star in files to use for flux calibration. Default is "STANDARD".
     :param plot: Whether to plot the flux calibration results. Default is True.
     :param output_dir: Directory to save the output files. If None, no files will be saved.
@@ -302,21 +326,37 @@ def run_flux_calibration_and_stitch(results: dict,
         steps_run = chanres.get("steps_run", [])
         for objname, spectra in group_spectra.items():
             newsp = []
-            exptime = float(spectra.header.get("EXPTIME", 1.0))
+            flux_calibrated = sens_func is not None and objname != standard_star_name.upper()
+            exptime = float(spectra.header["EXPTIME"])
             for sp in spectra.data:
-                if sens_func is None or objname==standard_star_name.upper():
+                if not flux_calibrated:
                     factor = 1.0
                 else:
                     factor = 10 ** sens_func(sp.wave)
                 sp.spec *= factor / exptime
                 sp.sig *= factor / exptime
+                if sp.covariance is not None:
+                    scale = np.broadcast_to(factor / exptime, sp.spec.shape)
+                    sp.covariance = sp.covariance.multiply(scale[:, None]).multiply(scale[None, :]).tocsr()
+                    sp.sig = np.sqrt(sp.covariance.diagonal())
                 newsp.append(sp)
-            new_spectra = Spectra(data=newsp, header=spectra.header)
+            header = spectra.header.copy()
+            if flux_calibrated:
+                output_unit = u.erg / (u.s * u.cm**2 * u.AA)
+            elif 'BUNIT' in header:
+                output_unit = u.Unit(header['BUNIT']) / u.s
+            else:
+                output_unit = None  # Legacy frames do not identify their input count unit.
+            if output_unit is not None:
+                header['BUNIT'] = output_unit.to_string()
+                header['COVUNIT'] = (output_unit**2).to_string()
+            spectra.header = header
+            new_spectra = Spectra(data=newsp, header=header)
             objects[objname] = objects.get(objname, []) + [new_spectra]
 
             if output_dir is not None:
-                suffix = "_raw" if lvl == 0 else "_blazecal" if lvl == 1 else "_fluxcal"
-                # new_spectra.save(f"{output_dir}/spectra_{objname}_{channel}{suffix}.fits", steps=steps_run)
+                suffix = "_fluxcal" if flux_calibrated else "_raw" if lvl == 0 else "_blazecal"
+                new_spectra.save(f"{output_dir}/spectra_{objname}_{channel}{suffix}.fits.gz", steps=steps_run)
                 save_spectra_to_ascii(new_spectra, f"{output_dir}/spectra_{objname}_{channel}{suffix}.txt")
 
     # stitch all objects across channels
@@ -324,9 +364,11 @@ def run_flux_calibration_and_stitch(results: dict,
     for objname, speclist in objects.items():
         specl = [sp.data[0] for sp in speclist]
         specl = Spectra(data=specl, header=speclist[0].header)
-        stitched = splice(specl, simple=False)
+        # Calibration response sets the flux scale; fitting additional overlap ratios would add another noisy estimator.
+        stitched = splice(specl, simple=all(sp.covariance is not None for sp in specl.data))
         final_spectra[objname] = stitched
         if output_dir is not None:
+            stitched.save(f"{output_dir}/spectra_{objname}_stitched.fits.gz")
             save_spectra_to_ascii(stitched, f"{output_dir}/spectra_{objname}_stitched.txt")
 
     return final_spectra
