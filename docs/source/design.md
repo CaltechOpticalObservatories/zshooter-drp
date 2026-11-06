@@ -29,8 +29,13 @@ Baseline decisions:
   a single pipeline release, so `DRP-REPRO-002`..`006` do not apply. The reprocessing CLI (`DRP-RUN-016`, `REQ-2-ZS-512`) is still
   provided for operational re-reductions.
 - **Spectroscopic engine:** PyReduce (Piskunov et al. 2021), used through an adapter layer, following the CDR
-  baseline of reusing community codes. HISPEC ramps-to-slopes and extraction work are additional
-  primitive sources under the same contract.
+  baseline of reusing community codes. HISPEC extraction work is an additional primitive source under the same
+  contract.
+- **Detector data model and preprocessing:** [eregion](https://github.com/CaltechOpticalObservatories/eregion)
+  (Caltech COO), used through `core/adapters/eregion.py` under the same adapter contract. It supplies the canonical
+  detector-image container (§6), raw frame loading and assembly, zero-level and flat-field combination, cosmic-ray
+  masking, and the NIR ramp-to-slope fit. The HISPEC ramps-to-slopes algorithms reach the DRP generalized inside
+  eregion rather than as a separate dependency.
 
 ---
 
@@ -54,6 +59,10 @@ subflows used by both (§9).
 |---|---|----------------|---|---|
 | VIS | BLUE, GREEN, RED | CCD/qCCD       | 4096 x 2048 | Read-out image (overscan, multi-amplifier) |
 | NIR | YJ, H, K | H2RG/lmAPD     | 2048 x 2048 | Slope image fitted from up-the-ramp reads; ramps are not archived beyond engineering needs (CDR) |
+
+Raw data from every channel, of either detector class, is loaded into eregion's `DetImage` (§6). Per-output gain and
+read noise are measured during eregion detector characterization and reach the DRP through the header (§2.2), rather
+than being re-derived from the night's bias frames.
 
 Channel-specific static data lives in the instrument package `src/zsdrp/ZSHOOTER/`:
 
@@ -158,7 +167,7 @@ a channel, the QL flow for that channel can be dropped (ICD Appendix B).
 ### 4.1 Quick Look as an API
 
 The CDR does not treat quick look as a separate pipeline. Instead, the instrument GUI calls the same core functions
-the pipeline runs. The core layer therefore provides quick-look entry points:
+the pipeline runs. The core layer therefore provides quick-look entry points like:
 
 - `zsdrp.core.quicklook.reduce_frame(frame, cals, *, scatter=False, sky=False)` mutates the inbound data. It is
   called with flags that toggle scattered-light or sky removal.
@@ -167,7 +176,8 @@ the pipeline runs. The core layer therefore provides quick-look entry points:
 - `line_width(spectra, line)` for RV and line-width checks.
 
 These are core primitives. They have no Prefect dependency, so they run in the GUI process, in a notebook, or inside
-the quicklook flows (Guidelines §5.1).
+the quicklook flows (Guidelines §5.1). The spectral extraction will use simple boxcar algorithm for fast execution 
+required by quick-look.
 
 ---
 
@@ -192,6 +202,7 @@ src/zsdrp/
     adapters/
       pyreduce.py          # only module that imports pyreduce types
       scopesim.py          # simulation-truth helpers (Sec. 7.2)
+      eregion.py           # for preproc and frame load
   tasks/                   # thin Prefect task wrappers (<~20 lines each)
   flows/                   # per-arm cal/quicklook/science (vis, nir), shared subflows, flux_and_stitch, night, realtime
   instrument/              # current ZSHOOTER/ package: config, settings, atlases, FSR
@@ -201,7 +212,8 @@ src/zsdrp/
 ```
 
 `tests/test_layering.py` walks the AST of every module under `core/` and fails if any of them imports `prefect`,
-`zsdrp.tasks`, or `zsdrp.flows` (Guidelines §5.1, §9).
+`zsdrp.tasks`, or `zsdrp.flows` (Guidelines §5.1, §9). Neither PyReduce nor eregion carries a Prefect dependency, so
+both adapters satisfy this rule as written.
 
 ### 5.2 Mapping the Alpha `Step` Classes
 
@@ -210,9 +222,9 @@ PyReduce, and file I/O (`save`/`load`). They split as follows:
 
 | Alpha | Core primitive | Task | Notes |
 |---|---|---|---|
-| `MaskWrapper.run/load` | `calib.load_bad_pixel_mask` | `load_mask` (I/O task) | An absent mask means "no static mask", recorded in the parameters. The alpha's silent zero-mask fallback is removed. |
-| `BiasWrapper.run` | `calib.master_bias` (adapter → `combine_bias`) | `build_master_bias` | |
-| `FlatWrapper.run` | `calib.master_flat` (adapter → `combine_calibrate`) | `build_master_flat` | |
+| `MaskWrapper.run/load` | `calib.load_bad_pixel_mask` | `load_mask` (I/O task) | The static mask becomes a named mask plane on the `DetImage`. An absent mask means "no static mask", recorded in the parameters. The alpha's silent zero-mask fallback is removed. |
+| `BiasWrapper.run` | `calib.master_bias` (adapter → eregion) | `build_master_bias` | |
+| `FlatWrapper.run` | `calib.master_flat` (adapter → eregion) | `build_master_flat` | |
 | `TraceWrapper.run` | `trace.trace_orders` (adapter → `pyreduce.trace.trace`) | `trace_orders` | The parameter-name mapping moves into the adapter. |
 | `CurvatureWrapper.run` | `trace.fit_curvature` → new `TraceSet` | `fit_curvature` | The alpha mutates `traces` in place; the core version returns a new record. |
 | `NormflatWrapper.run` | `flat.normalize_flat` → `NormFlat` | `normalize_flat` | |
@@ -230,12 +242,16 @@ their call sites move.
 
 ## 6. Canonical Data Model
 
-Every value that crosses a task boundary is one of the types below (Guidelines §5.5). Records are frozen dataclasses,
-and arrays inside them are treated as read-only (`arr.flags.writeable = False` at construction).
+Every value that crosses a task boundary is one of the types below (Guidelines §5.5). The structural records are
+frozen dataclasses, and arrays inside them are treated as read-only (`arr.flags.writeable = False` at construction).
+The eregion containers are not frozen, so a primitive that modifies a frame returns a new `DetImage` rather than
+mutating the one it was given (Guidelines §5.4).
 
 | Type | Contents | Produced by |
 |---|---|---|
-| `astropy.nddata.CCDData` | `data` (e-/s or ADU, unit carried), `uncertainty` (`VarianceUncertainty`), `mask` (bool), `meta` header | Raw assembly, master calibrations, processed 2D frames |
+| `eregion.datamodels.DetImage` | `data` plane, `std` (1-sigma), and for combined frames `count`, as named planes of an `xarray.Dataset` with dims `(y, x)`; named boolean mask planes and integer label planes; per-`Output` amplifier regions each carrying their FITS header; primary header in `meta` | Raw load, preprocessing, master calibrations, processed 2D frames |
+| `eregion.datamodels.DetImage3D` | Up-the-ramp read cube, dims `(y, x, t)`, with the same `Output` regions and `meta`. Consumed by the ramp fit and not archived | Raw load, NIR |
+| `ImageBundle` | Ordered `DetImage` collection with its `image_type` table, used wherever a step consumes a stack of frames | `discover_frames`, `group_calibrations` |
 | `FrameRef` | Path, `KOAID`, `IMTYPE`, `CHANNEL`, `OBJECT`, `DATE-OBS`, `EXPTIME`, content fingerprint | `discover_frames` |
 | `CalibrationSet` | Channel, epoch ID, and refs to master bias, dark, flat, `TraceSet`, `NormFlat`, `WaveSolution` | `cal_flow_vis` / `cal_flow_nir` |
 | `TraceSet` | Per-order centre polynomials, column ranges, extraction heights, slit curvature coefficients, order numbers `m` | `trace_orders`, `fit_curvature` |
@@ -244,10 +260,32 @@ and arrays inside them are treated as read-only (`arr.flags.writeable = False` a
 | `ExtractedSpectra` | Per-order `spec`, `sig`, `wave` (optional), `cont`, `m`; header; extraction parameters | `extract_science` and later steps |
 | `SensitivityCurve` | Chebyshev coefficients, wavelength domain, reference-star ID | `sensitivity_function` |
 
+`DetImage` replaces `astropy.nddata.CCDData`, which is a CCD-shaped container: one array, one header, one
+uncertainty, and no concept of amplifier regions or of a read cube. The properties that differ, and that the rest of
+this document depends on:
+
+- Uncertainty is the `std` plane and is 1-sigma, matching §14.1. The `VARIANCE` extension of §14.1 is written as
+  `std**2`, so the archived product specification is unchanged.
+- The pixel planes carry no unit. Flux units travel in `meta` and are written to `BUNIT` (§14.1). This is the one
+  capability lost relative to `CCDData`.
+- Masking is a set of named boolean planes OR-ed into a combined mask, not a single bit-flag DQ word. Each masking
+  step contributes its own plane, so why a pixel is masked survives into the product (§14.1).
+- `DetImage` is two-dimensional. The NIR ramp is a `DetImage3D`, which only the ramp-to-slope primitive consumes.
+  Every step after it sees a `DetImage`, so the two arms share one container from the slope image onward.
+
 `src/zsdrp/core/adapters/pyreduce.py` converts between these types and the PyReduce-native ones (`Trace`, `Spectra`,
 `Spectrum`, `ExtractionParams`, the `Instrument` subclass, and header dicts). No PyReduce type appears in a task
 signature. Where PyReduce mutates its inputs (`Trace.slit`, `Trace.wave`, `Trace.m`), the adapter deep-copies before
-the call and builds a new record afterwards (Guidelines §5.4).
+the call and builds a new record afterwards (Guidelines §5.4). PyReduce's primitives take a bare array and a header
+dict, so the adapter passes `DetImage` planes straight through. `src/zsdrp/core/adapters/eregion.py` is the only
+module that constructs eregion types.
+
+Guidelines §5.5 forbids an external library's native type in a task signature, and `DetImage` does appear in task
+signatures. The deviation is deliberate: eregion is adopted at the data-model layer, in the role the Guidelines
+reserve for "a standard container carrying data, uncertainty, mask, and header", which is the position `CCDData`
+held before. The prohibition continues to apply to algorithm-library types such as PyReduce's `Trace` and `Spectra`.
+The cost is that eregion becomes a pinned data-model dependency rather than an interchangeable primitive source,
+which is why it is recorded in §21.7 and in open items O-9 and O-10.
 
 ---
 
@@ -257,21 +295,21 @@ This section fills in Guidelines §11.1. The first table covers ZSpec primitives
 
 | Primitive | Source | Types in → out | Dual-layer | Notes |
 |---|---|---|---|---|
-| Raw assembly and orientation | Instrument (new) | raw HDUList → `CCDData` | No | Overscan subtraction and trim from header `DATASEC`/`BIASSEC`, per-amplifier gain, rotation into PyReduce orientation (`config.yaml: orientation`). Not exercised by the alpha, which runs on pre-assembled simulated frames. |
-| NIR ramp → slope | HISPEC ramps-to-slopes | ramp cube → `CCDData` | Candidate | Runs at the instrument or DRP ingest. Ramps are not archived (CDR). Includes reference-pixel correction, non-linearity, and jump detection. |
-| Master bias | PyReduce `combine_bias` | `list[CCDData]` → `CCDData` | No | CCD channels. Header `degree: 0` in `settings.yaml`. |
-| Master dark | New (astropy) | `list[CCDData]` → `CCDData` | No | NIR channels, scaled by `EXPTIME`. |
-| Bad-pixel mask | Instrument static + data-driven | `CCDData` → mask | No | Static `mask_<CHANNEL>` plus hot/dead pixels from darks and flats. |
-| Master flat | PyReduce `combine_calibrate` | `list[CCDData]`, bias → `CCDData` | No | `bias_scaling: exposure_time`. |
-| Order tracing | PyReduce `trace.trace` | flat `CCDData` → `TraceSet` | No | Whittaker filter, `degree: 4`. The optional `order_centers` seed comes from instrument data. |
-| Slit curvature | PyReduce `slit_curve.Curvature` | arc `CCDData`, `TraceSet` → `TraceSet` | No | 1D mode, `degree: 0`. The tilt is the detector rotation (see the comments in `settings.yaml`). |
-| Scattered light | PyReduce `estimate_background_scatter` | `CCDData`, `TraceSet` → background model | No | Disabled in the alpha (`ReductionStep.SCATTER` is commented out). Required for the processed 2D products (CDR). |
+| Raw assembly and orientation | eregion | raw HDUList → `DetImage` | No | Per-`Output` assembly and pre/overscan subtraction from the eregion detector configuration; per-output gain and read noise from the header. Rotation into PyReduce orientation (`config.yaml: orientation`) stays in `zsdrp`. Not exercised by the alpha, which runs on pre-assembled simulated frames. |
+| NIR ramp → slope | eregion (generalized HISPEC ramps-to-slopes) | `DetImage3D` → `DetImage` (`data` + `std`) | Candidate | Runs at the instrument or DRP ingest. Ramps are not archived (CDR). Includes reference-pixel correction, non-linearity, and jump detection, the last of which lands as a named mask plane. In development in eregion (O-9). |
+| Master bias | eregion | `ImageBundle` → `DetImage` | No | CCD channels. Produces `data`, `std`, and `count` planes. Read noise is not re-derived here; it comes from the header. |
+| Master dark | eregion | `ImageBundle` → `DetImage` | No | NIR channels, scaled by `EXPTIME`. |
+| Bad-pixel mask | Instrument static + eregion masking | `DetImage` → named mask planes | No | Static `mask_<CHANNEL>` plus hot/dead pixels from darks and flats, each contributed as its own named plane. |
+| Master flat | eregion | `ImageBundle`, bias → `DetImage` | No | Bias scaled by exposure time. The same combination builds the master arc. |
+| Order tracing | PyReduce `trace.trace` | flat `DetImage` → `TraceSet` | No | Whittaker filter, `degree: 4`. The optional `order_centers` seed comes from instrument data. |
+| Slit curvature | PyReduce `slit_curve.Curvature` | arc `DetImage`, `TraceSet` → `TraceSet` | No | 1D mode, `degree: 0`. The tilt is the detector rotation (see the comments in `settings.yaml`). |
+| Scattered light | PyReduce `estimate_background_scatter` | `DetImage`, `TraceSet` → background model | No | Disabled in the alpha (`ReductionStep.SCATTER` is commented out). Required for the processed 2D products (CDR). |
 | Normalized flat, blaze | PyReduce `extract_normalize` | flat, `TraceSet` → `NormFlat` | Yes (PyReduce `numpy` / `c` slit decomposition) | Gain, read noise, and dark come from the master-flat header. |
-| Cosmic-ray rejection | astroscrappy (L.A.Cosmic) or PyReduce optimal-extraction rejection | `CCDData` → `CCDData` | Yes | VIS: single science frames; stacks use the combine-time rejection. NIR: mostly handled by jump detection in the ramp fit. |
-| Wavelength solution | PyReduce `WavelengthCalibrationInitialize` + `WavelengthCalibration` | arc `CCDData`, `TraceSet` → `WaveSolution` | No | ThAr atlas (`atlas: thar`, `medium: air`), 2D polynomial `degree: 3`. Assigns order numbers from `obase`. |
-| Science extraction | PyReduce `extract` (optimal), box sum (new) | `CCDData`, `TraceSet`, `NormFlat` → `ExtractedSpectra` | Yes (optimal) | Optimal extraction for Science, box extraction for Quicklook. |
-| Sky subtraction, nod | Nod A-B difference (`SUBTRACTED` header) or nod-and-shuffle (new) | `CCDData` pair → `CCDData` | No | NIR arm, for OH suppression; nod-and-shuffle only if adopted (TBD). The alpha skips bias for A-B frames. |
-| Sky subtraction, model | Slit-sky model (new) | `CCDData`, `TraceSet` → `CCDData` | No | VIS arm, and any non-nodded data. |
+| Cosmic-ray rejection | eregion (L.A.Cosmic) or PyReduce optimal-extraction rejection | `DetImage` → `DetImage` | Yes | Flagged pixels are a named mask plane, and the connected-component labels are kept alongside it. VIS: single science frames; stacks use the combine-time rejection. NIR: mostly handled by jump detection in the ramp fit. |
+| Wavelength solution | PyReduce `WavelengthCalibrationInitialize` + `WavelengthCalibration` | arc `DetImage`, `TraceSet` → `WaveSolution` | No | ThAr atlas (`atlas: thar`, `medium: air`), 2D polynomial `degree: 3`. Assigns order numbers from `obase`. |
+| Science extraction | PyReduce `extract` (optimal), box sum (new) | `DetImage`, `TraceSet`, `NormFlat` → `ExtractedSpectra` | Yes (optimal) | Optimal extraction for Science, box extraction for Quicklook. |
+| Sky subtraction, nod | Nod A-B difference (`SUBTRACTED` header) or nod-and-shuffle (new) | `DetImage` pair → `DetImage` | No | NIR arm, for OH suppression; nod-and-shuffle only if adopted (TBD). The alpha skips bias for A-B frames. |
+| Sky subtraction, model | Slit-sky model (new) | `DetImage`, `TraceSet` → `DetImage` | No | VIS arm, and any non-nodded data. |
 | Blaze normalization | New (`BlazeNormalization`) | `ExtractedSpectra`, `WaveSolution`, `NormFlat`, FSR → `ExtractedSpectra` | No | Trims each order to its free spectral range, then splices orders. |
 | Sensitivity function | New (`SensitivityFunction`) | standard `ExtractedSpectra`, reference spectrum → `SensitivityCurve` | No | log10 ratio, median filter, sigma-clipped Chebyshev degree 6. |
 | Telluric correction | Model fitting (e.g. molecfit-class) or telluric-standard division | `ExtractedSpectra` → `ExtractedSpectra` | No | Not in the alpha. CDR calibration product. |
@@ -280,21 +318,22 @@ This section fills in Guidelines §11.1. The first table covers ZSpec primitives
 
 ### 7.1 Dual-Layer Primitives
 
-PyReduce ships four slit-decomposition backends behind one call site in `pyreduce.extract`:
+PyReduce puts its slit decomposition behind one call site in `pyreduce.extract`. `zsdrp` supports two of its
+backends:
 
-- `c`: the vendored CFFI extension, which is PyReduce's default.
-- `charslit`: an external package.
-- `numba`.
-- `numpy`: a pure-Python port.
+- `numpy`: a pure-Python port, which `zsdrp` treats as the canonical implementation.
+- `c`: the vendored CFFI extension, which is PyReduce's default and which `zsdrp` treats as the compiled override
+  (Guidelines §5.9).
 
-`zsdrp` treats `numpy` as the canonical implementation and `c` as the compiled override (Guidelines §5.9).
-Differential tests run both on the same fixture frames (§18).
+Differential tests run both on the same fixture frames (§18). PyReduce's remaining backends are optional extras of
+`pyreduce-astro` rather than core requirements, and `zsdrp` does not offer them: they add no capability that `numpy`
+and `c` do not already cover, and each would add a dependency.
 
 PyReduce reads its backend from the `PYREDUCE_EXTRACTION` environment variable. `DRP-BLD-006` forbids configuring
 pipeline operation through the environment, so in `zsdrp` the backend is a configuration and CLI option
-(`extraction_backend`, `--backend numpy`). `core/adapters/pyreduce.py` applies it to the PyReduce call in-process.
-Users never set the variable, and the selected backend is part of every extraction task's parameters and cache key.
-This replaces the Guidelines' "environment override".
+(`extraction_backend`, `--backend numpy`), which accepts `numpy` or `c`. `core/adapters/pyreduce.py` applies it to the
+PyReduce call in-process. Users never set the variable, and the selected backend is part of every extraction task's
+parameters and cache key. This replaces the Guidelines' "environment override".
 
 Use of compiled code needs SSG approval under `DRP-DEV-003` (§21, open item O-2).
 
@@ -366,10 +405,10 @@ It is never a branch that the other arm skips at run time, so a VIS run never sh
 
 | Step | VIS | NIR |
 |---|---|---|
-| Raw assembly: overscan, multi-amplifier, orientation | Yes | Reference-pixel correction and orientation |
-| Ramp → slope (non-linearity, jump detection) | — | Yes, at ingest |
-| Zero level | Master bias | Master dark, matched in `EXPTIME` |
-| Cosmic-ray rejection | On frames or at combine | Largely handled by jump detection in the ramp fit |
+| Raw assembly (eregion): overscan, multi-amplifier, orientation | Yes | Reference-pixel correction and orientation |
+| Ramp → slope (eregion): non-linearity, jump detection | — | Yes, at ingest |
+| Zero level (eregion) | Master bias | Master dark, matched in `EXPTIME` |
+| Cosmic-ray rejection | eregion L.A.Cosmic on frames, or at combine | Largely handled by jump detection in the ramp fit |
 | Sky | Slit-sky model or none | A-B nod pairs; nod-and-shuffle for OH suppression if adopted (TBD) |
 | Order calibration, extraction, blaze normalization | `order_cal_subflow`, `extract_subflow` | Same subflows |
 
@@ -455,6 +494,9 @@ Concurrency model:   groups concurrent on a process pool; chain within a group s
 Timing requirement:  none (automatic mode: completes before next-night checkout, ICD DRP Servers)
 Failure behavior:    one group's failure leaves the others intact; run state COMPLETED_WITH_FAILURES
 ```
+
+`preprocess_vis` and `preprocess_nir` are thin tasks over the eregion adapter. Both end with a `DetImage` carrying
+its `std` plane and the named mask planes each step contributed, so `extract_subflow` is identical for the two arms.
 
 ```mermaid
 flowchart TD
@@ -584,6 +626,8 @@ This section fills in Guidelines §11.4.
 
 | Task | Exit summary statistics | QA product |
 |---|---|---|
+| `assemble_frame` | Overscan level and sigma per output, saturated fraction | — |
+| `ramp_to_slope` (NIR) | Reads used, jump-flagged pixel count, saturated fraction | — |
 | `build_master_bias` / `dark` | Median, robust sigma, hot-pixel count | — |
 | `build_master_flat` | Median counts per order region, saturated fraction | — |
 | `trace_orders` | Orders found vs. expected per channel, median order width, polynomial RMS | Trace overlay PNG |
@@ -628,7 +672,7 @@ products are FITS with standard-conforming headers and extensions (`KOA-ICS-001`
 | Product | Level | Filename | Extensions | Label |
 |---|---|---|---|---|
 | Raw frame (CCD) / slope image (NIR) | lev0 | Instrument (KOAID) | PRIMARY header; image(s) per amplifier or slope; NIR: slope variance | Threshold |
-| Master calibrations (§8) | cal | `<first>_<type>.fits` | PRIMARY; `DATA`; `VARIANCE`; `MASK`; type-specific table (e.g. `TRACES`, `LINES`) | Baseline |
+| Master calibrations (§8) | cal | `<first>_<type>.fits` | PRIMARY; `DATA`; `VARIANCE`; `MASK`; `COUNT`; type-specific table (e.g. `TRACES`, `LINES`) | Baseline |
 | Quicklook 2D + 1D | QL | `<KOAID>_ql.fits` | PRIMARY; `DATA`; `SPEC` (per-order table: m, pixel, flux, sigma, wave); `QA` | Threshold |
 | Processed 2D frame | lev1 | `<KOAID>_2d.fits` | PRIMARY; `DATA`; `VARIANCE`; `MASK`; `WAVE` (2D wavelength map); `BIAS`; `FLAT`; `SCATTER`; `SKY`; `CRMASK`; WCS keywords | Baseline |
 | Extracted spectra, per order | lev1 | `<KOAID>_1d.fits` | PRIMARY; `SPEC` (binary table per order: m, pixel, wave, flux, sigma, blaze); `QA` | Threshold |
@@ -639,7 +683,11 @@ products are FITS with standard-conforming headers and extensions (`KOA-ICS-001`
 
 Wavelength units are Angstrom. The air/vacuum convention is recorded in `WAVEMED`. Flux units are recorded in `BUNIT`
 for every image extension and in `TUNITn` for every table column. Uncertainties are 1-sigma, propagated from the raw
-variance (read noise, gain, dark) through every step (ICD Appendix B, `DRP-DEV-008` "scientific validity").
+variance (read noise, gain, dark) through every step (ICD Appendix B, `DRP-DEV-008` "scientific validity"). The
+`DetImage` `std` plane holds that 1-sigma value, and the writer squares it into the `VARIANCE` extension.
+
+The `MASK` extension holds the combined boolean mask. The names of the mask planes that contributed to it are listed
+in its header, so the reason a pixel was rejected survives archiving (§6).
 
 ### 14.2 Header Keywords
 
@@ -661,7 +709,9 @@ When the parameter set is too large for header cards, it goes in a dedicated `PR
 - **Permissions.** In automatic mode, files are written with mode `0o644` by a non-root service account. They are
   never world-writable or executable (`DRP-RUN-007`).
 - **Intermediates.** Intermediate products stay in the result cache. They are serialized to FITS only on request
-  (`zsdrp export <run_id> <task>`). The alpha's `.npz` side-effect writes are removed.
+  (`zsdrp export <run_id> <task>`). The alpha's `.npz` side-effect writes are removed. eregion serializes a
+  `DetImage` to netCDF, which is the cache representation of a 2D frame; every archived product is FITS written by
+  `zsdrp.io` (`KOA-ICS-001`).
 - **Output directories.** Default output and log directories are created on first invocation (`DRP-BLD-003`). Any
   output location can be given at runtime (`DRP-RUN-004`).
 
@@ -700,7 +750,9 @@ def file_write_hook(koaid: str, filepath: str, start_time: str, final: bool = Fa
 - PEP 8 compliance is checked by a linter in CI (`DRP-DEV-007`). No automatic reformatter is used.
 - Targets Ubuntu 24.04 LTS, with macOS supported for users (`DRP-DEV-011`).
 - Installation: `pip install zsdrp` (PyPI, from the CDR) or `uv sync` from the committed `uv.lock`. Top-level
-  dependencies are pinned. The build system (setuptools, uv) is subject to SSG approval (`DRP-BLD-001`).
+  dependencies are pinned. The build system (setuptools, uv) is subject to SSG approval (`DRP-BLD-001`). eregion is
+  a pinned top-level dependency; its PyPI release is scheduled before PDR, and until then it installs from the COO
+  GitHub repository at a pinned revision (§21, open item O-10).
 - Static files (line atlases, FSR tables, static masks, reference spectra) are fetched by a post-install step that
   checks checksums. WMKO can serve the files (`DRP-BLD-008`). The step runs automatically on first import if it has
   not been run before, so the DRP runs straight after clone and build (`DRP-BLD-004`).
@@ -734,6 +786,7 @@ product:
 |---|---|---|
 | CCD raw (16-bit, assumed) | 4096 x 2048 | 16 MiB plus overscan |
 | NIR slope (float32) | 2048 x 2048 | 16 MiB, or 32 MiB with variance |
+| NIR ramp (`DetImage3D`, float32), held in memory during the fit only | 2048 x 2048 x n_reads | about 512 MiB at 32 reads |
 | Processed 2D, CCD (float32 data + variance + wave, 8-bit mask, correction maps) | 4096 x 2048 | about 100–160 MiB depending on the correction maps kept |
 | Extracted 1D per channel | n_order x 2048 x 6 columns | < 5 MiB |
 
@@ -752,12 +805,14 @@ higher. Run continuously, it could deliver about 135 TiB per night (CDR).
   calibration. `quicklook_flow`: bias, flat, and a sampled-frame preview. `science_flow`: bias/dark, non-linearity,
   flat, CR rejection, astrometric WCS, and stacking/photometry products.
 - **Non-linearity.** A low-light non-linear response correction, of the kind identified for the Lightspeed
-  pathfinder, is planned if issues remain in the delivered Hamamatsu sensors. It is simple per pixel but
-  compute-heavy at ZImager rates. It is a dual-layer primitive: readable NumPy as canonical, with numba (on the WMKO
-  supported list) or a GPU backend as overrides.
+  pathfinder, is planned if issues remain in the delivered Hamamatsu sensors. It is an eregion primitive, simple per
+  pixel but compute-heavy at ZImager rates. It is a dual-layer primitive: readable NumPy as canonical, with a GPU
+  backend as the override.
 - **I/O.** Streaming blosc2 compression and possibly HDF5 containers for high-rate cubes. The canonical data model
-  gains a chunked cube type whose chunks are the fan-out units. Archived products remain FITS (`KOA-ICS-001`). Any
-  non-FITS intermediate stays in the cache.
+  gains a chunked cube type whose chunks are the fan-out units; because `DetImage` is already backed by named xarray
+  planes, that is a chunked form of the same container rather than a second data model. eregion's focal-plane
+  mosaicking assembles the three channels. Archived products remain FITS (`KOA-ICS-001`). Any non-FITS intermediate
+  stays in the cache.
 - **Resources.** 135 TiB/night is far beyond the WMKO DRP server's 32 TB HDD and 1 TB NVMe. Expected operational
   duty cycle, on-the-fly reduction or decimation, and whether ZImager-specific compute or storage must be procured
   with a spare (`DRP-DEV-012`) are to be raised with SSG and settled at PDR (§21, open item O-5).
@@ -772,7 +827,8 @@ higher. Run continuously, it could deliver about 135 TiB per night (CDR).
 | Core unit tests | Physical relationships on small synthetic inputs (e.g. splice preserves flux where pieces agree; sensitivity curve recovers a known response) | `DRP-DEV-008` |
 | Dual-layer differential tests | Canonical and compiled backends agree within documented tolerance (full-content comparison) | Guidelines §5.9 |
 | Flow fixture tests | The calibration, quicklook, and science flows of both arms, plus `flux_and_stitch_flow`, run end to end on a small set simulated by ScopeSim (`zs-scopesim`), comparing wavelength and flux against the simulation truth. Covers at least one VIS and one NIR channel, and a NIR nod sequence | `DRP-DEV-008` (one test per mode) |
-| Raw-format tests | Assembly and orientation on raw multi-amplifier frames with overscan, not only pre-assembled simulations | Guidelines §9 |
+| Raw-format tests | eregion assembly and orientation on a raw multi-output frame with overscan (VIS), and a ramp cube to slope (NIR), not only pre-assembled simulations | Guidelines §9 |
+| Adapter round-trip test | `DetImage` → PyReduce arrays → `DetImage` preserves data, mask planes, and header | Guidelines §5.5 |
 | Corrupt-input test | A batch with one truncated FITS completes as `COMPLETED_WITH_FAILURES` | `DRP-RUN-022` |
 | Memory / CPU profiling | No net growth over repeated one-shot runs and over a long `realtime_flow` soak | `DRP-RUN-018`, `DRP-RUN-019` |
 | Concurrent-instance test | Two instances with different profiles and cache roots on disjoint inputs | `DRP-RUN-013` |
@@ -825,6 +881,7 @@ A code of conduct (Astropy-style) is linked from the documentation index (ICD Ap
 | `free_spectral_range[1:]` hack for RED (`pipe.py`) | FSR table indexed by order number `m` from the `TraceSet` |
 | Hard-coded `2048` in `BlazeNormalization` | Column count from the frame shape |
 | `simple_wavesol` reads ScopeSim configuration from headers | Simulation-only adapter (§7.2) |
+| No raw assembly and no detector data model; runs on pre-assembled simulated frames | eregion `DetImage` at ingest for both arms (§6, §7) |
 | Scattered light disabled; no CR, sky model, telluric, or dark | Primitives listed in §7 |
 | No `DRPVERNO`, `DRPSTATU`, `PROGID`/`KOAID` propagation, provenance, or KOA hook | §14.2, §15 |
 | No CLI | `zsdrp-oneshot`, `zsdrp-realtime`, `zsdrp-reprocess` (§4) |
@@ -949,8 +1006,8 @@ content-keyed cache and `zsdrp-reprocess` already provide the mechanics.
 | 1. Code of conduct | Adopted (§19) |
 | 2. Documentation (Astropy style, numpydoc, Read the Docs) | Adopted (§19) |
 | 3. Continuous integration | GitHub Actions (§18) |
-| 4. Minimize dependencies | Core stack is numpy, scipy, astropy, matplotlib, numba. **Deviation:** `pyreduce-astro`, `prefect`, `pyyaml`, `tqdm` (and `astroscrappy` if adopted). To be reported to the Data Services Lead Scientist (O-3) |
-| 5. Re-use existing code | PyReduce, HISPEC ramps-to-slopes, and PypeIt as primitive sources; contributions back to Astropy/specreduce (CDR) |
+| 4. Minimize dependencies | Core stack is numpy, scipy, astropy, matplotlib, numba. **Deviation:** `pyreduce-astro`, `eregion`, `prefect`, `pyyaml`, `tqdm`, and eregion's own footprint (`xarray`, `pydantic`, `pandas`, `h5netcdf`, `lacosmic`, `pint`, `joblib`, `uncertainties`). To be reported to the Data Services Lead Scientist (O-3) |
+| 5. Re-use existing code | PyReduce, eregion (which carries the generalized HISPEC ramps-to-slopes algorithms), HISPEC extraction work, and PypeIt as primitive sources; contributions back to Astropy/specreduce (CDR) |
 | 6. Develop for re-use | Core primitives operate on arrays and canonical types and do not assume a FITS layout |
 | 7. Clear error messages | Per-task failure fields name the task and its inputs (§12, §13) |
 | 8. No hard-coded values | Header keywords, then configuration files, then named constants (§11, §20) |
@@ -967,6 +1024,8 @@ content-keyed cache and `zsdrp-reprocess` already provide the mechanics.
 | O-6 | Per-hour and per-night data volumes (`KOA-VOL-003`/`004`) | Instrument team | PDR |
 | O-7 | Measured QL latency per channel; waiver request if any channel exceeds 10 min | DRP lead | PSR |
 | O-8 | Sky-subtraction observing modes per arm (A-B nod, nod-and-shuffle for OH suppression, or neither), which fix the final VIS/NIR DAG difference (§9.0) | Instrument + science teams | PDR |
+| O-9 | eregion NIR readiness: the `DetImage3D` container and the generalized HISPEC ramp-to-slope, jump-detection, non-linearity, and reference-pixel algorithms (§6, §7) | DRP lead + COO | PDR |
+| O-10 | eregion PyPI release and version pin, which `DRP-BLD-004` and the §16.1 install path depend on | DRP lead + COO | Before PDR |
 
 ---
 
@@ -976,6 +1035,8 @@ content-keyed cache and `zsdrp-reprocess` already provide the mechanics.
 |---|---|
 | Arm | Group of ZSpec channels that share one DAG shape: VIS (BLUE, GREEN, RED) or NIR (YJ, H, K) |
 | Channel | One ZSpec detector (BLUE, GREEN, RED, YJ, H, K) or ZImager band |
+| `DetImage` / `DetImage3D` | eregion's detector-image containers: named xarray planes, per-`Output` regions, named mask planes. The 3D form holds an up-the-ramp read cube |
+| `Output` | One amplifier or readout region of a detector, with its own header and mask planes |
 | Epoch | Interval of unchanged instrument configuration over which a calibration product is valid |
 | FSR | Free spectral range of an echelle order |
 | lev0 / lev1 / lev2 | Raw; reduced per exposure (2D, extracted); science-ready (flux-calibrated, stitched) |
