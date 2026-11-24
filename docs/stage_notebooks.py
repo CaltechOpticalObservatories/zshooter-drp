@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 
@@ -28,7 +29,24 @@ def stage_notebooks(source: Path = NOTEBOOKS_SRC, destination: Path = NOTEBOOKS_
         shutil.rmtree(destination)
 
     shutil.copytree(source, destination, ignore=shutil.ignore_patterns(*IGNORED_NAMES))
-    notebook_count = sum(1 for _ in destination.rglob("*.ipynb"))
+    notebooks = list(destination.rglob("*.ipynb"))
+    for path in notebooks:
+        notebook = json.loads(path.read_text(encoding="utf-8"))
+        changed = False
+        for cell in notebook["cells"]:
+            if cell["cell_type"] != "markdown":
+                continue
+            source_text = cell["source"]
+            text = "".join(source_text)
+            # Canonical notebooks sit beside docs/. Staged notebooks sit
+            # inside docs/source/, so their report links move up one level.
+            updated = text.replace("](../docs/source/", "](../")
+            if updated != text:
+                cell["source"] = updated.splitlines(keepends=True) if isinstance(source_text, list) else updated
+                changed = True
+        if changed:
+            path.write_text(json.dumps(notebook, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    notebook_count = len(notebooks)
     if notebook_count == 0:
         raise RuntimeError(f"No notebooks were staged from {source}")
     return notebook_count
