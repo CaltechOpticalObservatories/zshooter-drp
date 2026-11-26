@@ -16,5 +16,6 @@ calibration recipes, and final data products will evolve with the instrument.
 kilonova-reduction-repair
 xshooter-reduction
 getting-started
+design/index
 Extraction demo <notebooks/extraction_demo>
 ```
